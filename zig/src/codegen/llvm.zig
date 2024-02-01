@@ -2941,9 +2941,13 @@ pub const Object = struct {
         const target = owner_mod.resolved_target.result;
         const sret = firstParamSRet(fn_info, zcu);
 
+        const is_extern = decl.isExtern(zcu);
         const function_index = try o.builder.addFunction(
             try o.lowerType(zig_fn_type),
-            try o.builder.string(ip.stringToSlice(try decl.getFullyQualifiedName(zcu))),
+            try o.builder.string(ip.stringToSlice(if (is_extern)
+                decl.name
+            else
+                try decl.getFullyQualifiedName(zcu))),
             toLlvmAddressSpace(decl.@"addrspace", target),
         );
         gop.value_ptr.* = function_index.ptrConst(&o.builder).global;
@@ -2951,7 +2955,6 @@ pub const Object = struct {
         var attributes: Builder.FunctionAttributes.Wip = .{};
         defer attributes.deinit(&o.builder);
 
-        const is_extern = decl.isExtern(zcu);
         if (!is_extern) {
             function_index.setLinkage(.internal, &o.builder);
             function_index.setUnnamedAddr(.unnamed_addr, &o.builder);
@@ -3256,7 +3259,12 @@ pub const Object = struct {
                 128 => .fp128,
                 else => unreachable,
             },
-            .anyopaque_type => unreachable,
+            .anyopaque_type => {
+                // This is unreachable except when used as the type for an extern global.
+                // For example: `@extern(*anyopaque, .{ .name = "foo"})` should produce
+                // @foo = external global i8
+                return .i8;
+            },
             .bool_type => .i1,
             .void_type => .void,
             .type_type => unreachable,
@@ -5070,7 +5078,8 @@ pub const FuncGen = struct {
                 .load           => try self.airLoad(body[i..]),
                 .loop           => try self.airLoop(inst),
                 .not            => try self.airNot(inst),
-                .ret            => try self.airRet(inst),
+                .ret            => try self.airRet(inst, false),
+                .ret_safe       => try self.airRet(inst, true),
                 .ret_load       => try self.airRetLoad(inst),
                 .store          => try self.airStore(inst, false),
                 .store_safe     => try self.airStore(inst, true),
@@ -5543,14 +5552,41 @@ pub const FuncGen = struct {
         _ = try fg.wip.@"unreachable"();
     }
 
-    fn airRet(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
+    fn airRet(self: *FuncGen, inst: Air.Inst.Index, safety: bool) !Builder.Value {
         const o = self.dg.object;
         const mod = o.module;
         const un_op = self.air.instructions.items(.data)[@intFromEnum(inst)].un_op;
         const ret_ty = self.typeOf(un_op);
+
         if (self.ret_ptr != .none) {
-            const operand = try self.resolveInst(un_op);
             const ptr_ty = try mod.singleMutPtrType(ret_ty);
+
+            const operand = try self.resolveInst(un_op);
+            const val_is_undef = if (try self.air.value(un_op, mod)) |val| val.isUndefDeep(mod) else false;
+            if (val_is_undef and safety) undef: {
+                const ptr_info = ptr_ty.ptrInfo(mod);
+                const needs_bitmask = (ptr_info.packed_offset.host_size != 0);
+                if (needs_bitmask) {
+                    // TODO: only some bits are to be undef, we cannot write with a simple memset.
+                    // meanwhile, ignore the write rather than stomping over valid bits.
+                    // https://github.com/ziglang/zig/issues/15337
+                    break :undef;
+                }
+                const len = try o.builder.intValue(try o.lowerType(Type.usize), ret_ty.abiSize(mod));
+                _ = try self.wip.callMemSet(
+                    self.ret_ptr,
+                    ptr_ty.ptrAlignment(mod).toLlvm(),
+                    try o.builder.intValue(.i8, 0xaa),
+                    len,
+                    if (ptr_ty.isVolatilePtr(mod)) .@"volatile" else .normal,
+                );
+                const owner_mod = self.dg.ownerModule();
+                if (owner_mod.valgrind) {
+                    try self.valgrindMarkUndef(self.ret_ptr, len);
+                }
+                _ = try self.wip.retVoid();
+                return .none;
+            }
 
             const unwrapped_operand = operand.unwrap();
             const unwrapped_ret = self.ret_ptr.unwrap();
@@ -5580,7 +5616,27 @@ pub const FuncGen = struct {
 
         const abi_ret_ty = try lowerFnRetTy(o, fn_info);
         const operand = try self.resolveInst(un_op);
+        const val_is_undef = if (try self.air.value(un_op, mod)) |val| val.isUndefDeep(mod) else false;
         const alignment = ret_ty.abiAlignment(mod).toLlvm();
+
+        if (val_is_undef and safety) {
+            const llvm_ret_ty = operand.typeOfWip(&self.wip);
+            const rp = try self.buildAlloca(llvm_ret_ty, alignment);
+            const len = try o.builder.intValue(try o.lowerType(Type.usize), ret_ty.abiSize(mod));
+            _ = try self.wip.callMemSet(
+                rp,
+                alignment,
+                try o.builder.intValue(.i8, 0xaa),
+                len,
+                .normal,
+            );
+            const owner_mod = self.dg.ownerModule();
+            if (owner_mod.valgrind) {
+                try self.valgrindMarkUndef(rp, len);
+            }
+            _ = try self.wip.ret(try self.wip.load(.normal, abi_ret_ty, rp, alignment, ""));
+            return .none;
+        }
 
         if (isByRef(ret_ty, mod)) {
             // operand is a pointer however self.ret_ptr is null so that means
@@ -6374,34 +6430,6 @@ pub const FuncGen = struct {
                 const elem_alignment = elem_ty.abiAlignment(mod).toLlvm();
                 return self.loadByRef(elem_ptr, elem_ty, elem_alignment, .normal);
             } else {
-                if (bin_op.lhs.toIndex()) |lhs_index| {
-                    if (self.air.instructions.items(.tag)[@intFromEnum(lhs_index)] == .load) {
-                        const load_data = self.air.instructions.items(.data)[@intFromEnum(lhs_index)];
-                        const load_ptr = load_data.ty_op.operand;
-                        if (load_ptr.toIndex()) |load_ptr_index| {
-                            const load_ptr_tag = self.air.instructions.items(.tag)[@intFromEnum(load_ptr_index)];
-                            switch (load_ptr_tag) {
-                                .struct_field_ptr,
-                                .struct_field_ptr_index_0,
-                                .struct_field_ptr_index_1,
-                                .struct_field_ptr_index_2,
-                                .struct_field_ptr_index_3,
-                                => {
-                                    const load_ptr_inst = try self.resolveInst(load_ptr);
-                                    const gep = try self.wip.gep(
-                                        .inbounds,
-                                        array_llvm_ty,
-                                        load_ptr_inst,
-                                        &indices,
-                                        "",
-                                    );
-                                    return self.loadTruncate(.normal, elem_ty, gep, .default);
-                                },
-                                else => {},
-                            }
-                        }
-                    }
-                }
                 const elem_ptr =
                     try self.wip.gep(.inbounds, array_llvm_ty, array_llvm_val, &indices, "");
                 return self.loadTruncate(.normal, elem_ty, elem_ptr, .default);
@@ -7479,7 +7507,7 @@ pub const FuncGen = struct {
         for (body_tail[1..]) |body_inst| {
             switch (air_tags[@intFromEnum(body_inst)]) {
                 .ret => return true,
-                .dbg_block_begin, .dbg_stmt => continue,
+                .dbg_stmt, .dbg_block_end => continue,
                 else => return false,
             }
         }
@@ -8714,10 +8742,10 @@ pub const FuncGen = struct {
             if (!result_is_ref) {
                 return self.dg.todo("implement bitcast vector to non-ref array", .{});
             }
-            const array_ptr = try self.buildAllocaWorkaround(inst_ty, .default);
+            const alignment = inst_ty.abiAlignment(mod).toLlvm();
+            const array_ptr = try self.buildAllocaWorkaround(inst_ty, alignment);
             const bitcast_ok = elem_ty.bitSize(mod) == elem_ty.abiSize(mod) * 8;
             if (bitcast_ok) {
-                const alignment = inst_ty.abiAlignment(mod).toLlvm();
                 _ = try self.wip.store(.normal, operand, array_ptr, alignment);
             } else {
                 // If the ABI size of the element type is not evenly divisible by size in bits;
@@ -11197,7 +11225,9 @@ const ParamTypeIterator = struct {
             .Unspecified, .Inline => {
                 it.zig_index += 1;
                 it.llvm_index += 1;
-                if (ty.isSlice(mod) or (ty.zigTypeTag(mod) == .Optional and ty.optionalChild(mod).isSlice(mod))) {
+                if (ty.isSlice(mod) or
+                    (ty.zigTypeTag(mod) == .Optional and ty.optionalChild(mod).isSlice(mod) and !ty.ptrAllowsZero(mod)))
+                {
                     it.llvm_index += 1;
                     return .slice;
                 } else if (isByRef(ty, mod)) {

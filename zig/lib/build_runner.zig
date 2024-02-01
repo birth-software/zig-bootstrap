@@ -95,7 +95,7 @@ pub fn main() !void {
     var install_prefix: ?[]const u8 = null;
     var dir_list = std.Build.DirList{};
     var summary: ?Summary = null;
-    var max_rss: usize = 0;
+    var max_rss: u64 = 0;
     var skip_oom_steps: bool = false;
     var color: Color = .auto;
     var seed: u32 = 0;
@@ -337,7 +337,7 @@ pub fn main() !void {
     };
 
     if (run.max_rss == 0) {
-        run.max_rss = process.totalSystemMemory() catch std.math.maxInt(usize);
+        run.max_rss = process.totalSystemMemory() catch std.math.maxInt(u64);
         run.max_rss_is_default = true;
     }
 
@@ -356,7 +356,7 @@ pub fn main() !void {
 }
 
 const Run = struct {
-    max_rss: usize,
+    max_rss: u64,
     max_rss_is_default: bool,
     max_rss_mutex: std.Thread.Mutex,
     skip_oom_steps: bool,
@@ -728,9 +728,14 @@ fn printStepFailure(
             try ttyconf.setColor(stderr, .reset);
         }
         try stderr.writeAll("\n");
-    } else {
+    } else if (s.result_error_msgs.items.len > 0) {
         try ttyconf.setColor(stderr, .red);
         try stderr.writeAll(" failure\n");
+        try ttyconf.setColor(stderr, .reset);
+    } else {
+        assert(s.result_stderr.len > 0);
+        try ttyconf.setColor(stderr, .red);
+        try stderr.writeAll(" stderr\n");
         try ttyconf.setColor(stderr, .reset);
     }
 }
@@ -918,8 +923,9 @@ fn workerMakeOneStep(
     const show_compile_errors = !run.prominent_compile_errors and
         s.result_error_bundle.errorMessageCount() > 0;
     const show_error_msgs = s.result_error_msgs.items.len > 0;
+    const show_stderr = s.result_stderr.len > 0;
 
-    if (show_error_msgs or show_compile_errors) {
+    if (show_error_msgs or show_compile_errors or show_stderr) {
         sub_prog_node.context.lock_stderr();
         defer sub_prog_node.context.unlock_stderr();
 
@@ -1012,11 +1018,16 @@ fn printErrorMessages(b: *std.Build, failing_step: *Step, run: *const Run) !void
     }
     try ttyconf.setColor(stderr, .reset);
 
-    // Penultimately, the compilation errors.
+    if (failing_step.result_stderr.len > 0) {
+        try stderr.writeAll(failing_step.result_stderr);
+        if (!mem.endsWith(u8, failing_step.result_stderr, "\n")) {
+            try stderr.writeAll("\n");
+        }
+    }
+
     if (!run.prominent_compile_errors and failing_step.result_error_bundle.errorMessageCount() > 0)
         try failing_step.result_error_bundle.renderToWriter(renderOptions(ttyconf), stderr.writer());
 
-    // Finally, generic error messages.
     for (failing_step.result_error_msgs.items) |msg| {
         try ttyconf.setColor(stderr, .red);
         try stderr.writeAll("error: ");

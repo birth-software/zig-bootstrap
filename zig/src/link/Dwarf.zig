@@ -1037,7 +1037,7 @@ pub fn init(lf: *File, format: Format) Dwarf {
         .format = format,
         .ptr_width = ptr_width,
         .dbg_line_header = switch (target.cpu.arch) {
-            .x86_64 => .{
+            .x86_64, .aarch64 => .{
                 .minimum_instruction_length = 1,
                 .maximum_operations_per_instruction = 1,
                 .default_is_stmt = true,
@@ -1468,7 +1468,6 @@ pub fn commitDeclState(
                     .target = reloc.target,
                     .offset = reloc.offset + self.getAtom(.di_atom, di_atom_index).off,
                     .addend = 0,
-                    .prev_vaddr = 0,
                 });
             },
             .elf => {}, // TODO

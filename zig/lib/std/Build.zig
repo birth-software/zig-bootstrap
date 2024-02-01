@@ -90,6 +90,8 @@ host: ResolvedTarget,
 dep_prefix: []const u8 = "",
 
 modules: std.StringArrayHashMap(*Module),
+
+named_writefiles: std.StringArrayHashMap(*Step.WriteFile),
 /// A map from build root dirs to the corresponding `*Dependency`. This is shared with all child
 /// `Build`s.
 initialized_deps: *InitializedDepMap,
@@ -273,6 +275,7 @@ pub fn create(
         .args = null,
         .host = host,
         .modules = std.StringArrayHashMap(*Module).init(allocator),
+        .named_writefiles = std.StringArrayHashMap(*Step.WriteFile).init(allocator),
         .initialized_deps = initialized_deps,
         .available_deps = available_deps,
     };
@@ -360,6 +363,7 @@ fn createChildOnly(parent: *Build, dep_name: []const u8, build_root: Cache.Direc
         .host = parent.host,
         .dep_prefix = parent.fmt("{s}{s}.", .{ parent.dep_prefix, dep_name }),
         .modules = std.StringArrayHashMap(*Module).init(allocator),
+        .named_writefiles = std.StringArrayHashMap(*Step.WriteFile).init(allocator),
         .initialized_deps = parent.initialized_deps,
         .available_deps = pkg_deps,
     };
@@ -595,6 +599,11 @@ pub fn resolveInstallPrefix(self: *Build, install_prefix: ?[]const u8, dir_list:
     self.h_dir = self.pathJoin(&h_list);
 }
 
+/// Create a set of key-value pairs that can be converted into a Zig source
+/// file and then inserted into a Zig compilation's module table for importing.
+/// In other words, this provides a way to expose build.zig values to Zig
+/// source code with `@import`.
+/// Related: `Module.addOptions`.
 pub fn addOptions(self: *Build) *Step.Options {
     return Step.Options.create(self);
 }
@@ -608,6 +617,7 @@ pub const ExecutableOptions = struct {
     root_source_file: ?LazyPath = null,
     version: ?std.SemanticVersion = null,
     optimize: std.builtin.OptimizeMode = .Debug,
+    code_model: std.builtin.CodeModel = .default,
     linkage: ?Step.Compile.Linkage = null,
     max_rss: usize = 0,
     link_libc: ?bool = null,
@@ -644,6 +654,7 @@ pub fn addExecutable(b: *Build, options: ExecutableOptions) *Step.Compile {
             .omit_frame_pointer = options.omit_frame_pointer,
             .sanitize_thread = options.sanitize_thread,
             .error_tracing = options.error_tracing,
+            .code_model = options.code_model,
         },
         .version = options.version,
         .kind = .exe,
@@ -662,6 +673,7 @@ pub const ObjectOptions = struct {
     /// To choose the same computer as the one building the package, pass the
     /// `host` field of the package's `Build` instance.
     target: ResolvedTarget,
+    code_model: std.builtin.CodeModel = .default,
     optimize: std.builtin.OptimizeMode,
     max_rss: usize = 0,
     link_libc: ?bool = null,
@@ -692,6 +704,7 @@ pub fn addObject(b: *Build, options: ObjectOptions) *Step.Compile {
             .omit_frame_pointer = options.omit_frame_pointer,
             .sanitize_thread = options.sanitize_thread,
             .error_tracing = options.error_tracing,
+            .code_model = options.code_model,
         },
         .kind = .obj,
         .max_rss = options.max_rss,
@@ -707,6 +720,7 @@ pub const SharedLibraryOptions = struct {
     /// `host` field of the package's `Build` instance.
     target: ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
+    code_model: std.builtin.CodeModel = .default,
     root_source_file: ?LazyPath = null,
     version: ?std.SemanticVersion = null,
     max_rss: usize = 0,
@@ -744,6 +758,7 @@ pub fn addSharedLibrary(b: *Build, options: SharedLibraryOptions) *Step.Compile 
             .omit_frame_pointer = options.omit_frame_pointer,
             .sanitize_thread = options.sanitize_thread,
             .error_tracing = options.error_tracing,
+            .code_model = options.code_model,
         },
         .kind = .lib,
         .linkage = .dynamic,
@@ -763,6 +778,7 @@ pub const StaticLibraryOptions = struct {
     /// `host` field of the package's `Build` instance.
     target: ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
+    code_model: std.builtin.CodeModel = .default,
     version: ?std.SemanticVersion = null,
     max_rss: usize = 0,
     link_libc: ?bool = null,
@@ -793,6 +809,7 @@ pub fn addStaticLibrary(b: *Build, options: StaticLibraryOptions) *Step.Compile 
             .omit_frame_pointer = options.omit_frame_pointer,
             .sanitize_thread = options.sanitize_thread,
             .error_tracing = options.error_tracing,
+            .code_model = options.code_model,
         },
         .kind = .lib,
         .linkage = .static,
@@ -973,6 +990,12 @@ pub fn addWriteFile(self: *Build, file_path: []const u8, data: []const u8) *Step
     return write_file_step;
 }
 
+pub fn addNamedWriteFiles(b: *Build, name: []const u8) *Step.WriteFile {
+    const wf = Step.WriteFile.create(b);
+    b.named_writefiles.put(b.dupe(name), wf) catch @panic("OOM");
+    return wf;
+}
+
 pub fn addWriteFiles(b: *Build) *Step.WriteFile {
     return Step.WriteFile.create(b);
 }
@@ -1013,6 +1036,11 @@ fn makeUninstall(uninstall_step: *Step, prog_node: *std.Progress.Node) anyerror!
     // TODO remove empty directories
 }
 
+/// Creates a configuration option to be passed to the build.zig script.
+/// When a user directly runs `zig build`, they can set these options with `-D` arguments.
+/// When a project depends on a Zig package as a dependency, it programmatically sets
+/// these options when calling the dependency's build.zig script as a function.
+/// `null` is returned when an option is left to default.
 pub fn option(self: *Build, comptime T: type, name_raw: []const u8, description_raw: []const u8) ?T {
     const name = self.dupe(name_raw);
     const description = self.dupe(description_raw);
@@ -1700,6 +1728,12 @@ pub const Dependency = struct {
     pub fn module(d: *Dependency, name: []const u8) *Module {
         return d.builder.modules.get(name) orelse {
             panic("unable to find module '{s}'", .{name});
+        };
+    }
+
+    pub fn namedWriteFiles(d: *Dependency, name: []const u8) *Step.WriteFile {
+        return d.builder.named_writefiles.get(name) orelse {
+            panic("unable to find named writefiles '{s}'", .{name});
         };
     }
 

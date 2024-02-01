@@ -575,6 +575,11 @@ pub const Value = struct {
         return getUnsignedInt(val, mod).?;
     }
 
+    /// Asserts the value is an integer and it fits in a u64
+    pub fn toUnsignedIntAdvanced(val: Value, sema: *Sema) !u64 {
+        return (try getUnsignedIntAdvanced(val, sema.mod, sema)).?;
+    }
+
     /// Asserts the value is an integer and it fits in a i64
     pub fn toSignedInt(val: Value, mod: *Module) i64 {
         return switch (val.toIntern()) {
@@ -842,16 +847,23 @@ pub const Value = struct {
                 // and Extern is handled in non-packed writeToMemory.
                 assert(struct_type.layout == .Packed);
                 var bits: u16 = 0;
-                const storage = ip.indexToKey(val.toIntern()).aggregate.storage;
                 for (0..struct_type.field_types.len) |i| {
+                    const field_val = switch (val.ip_index) {
+                        .none => switch (val.tag()) {
+                            .bytes => unreachable,
+                            .aggregate => val.castTag(.aggregate).?.data[i],
+                            .repeated => val.castTag(.repeated).?.data,
+                            else => unreachable,
+                        },
+                        else => Value.fromInterned(switch (ip.indexToKey(val.toIntern()).aggregate.storage) {
+                            .bytes => unreachable,
+                            .elems => |elems| elems[i],
+                            .repeated_elem => |elem| elem,
+                        }),
+                    };
                     const field_ty = Type.fromInterned(struct_type.field_types.get(ip)[i]);
                     const field_bits: u16 = @intCast(field_ty.bitSize(mod));
-                    const field_val = switch (storage) {
-                        .bytes => unreachable,
-                        .elems => |elems| elems[i],
-                        .repeated_elem => |elem| elem,
-                    };
-                    try Value.fromInterned(field_val).writeToPackedMemory(field_ty, mod, buffer, bit_offset + bits);
+                    try field_val.writeToPackedMemory(field_ty, mod, buffer, bit_offset + bits);
                     bits += field_bits;
                 }
             },
@@ -1545,6 +1557,8 @@ pub const Value = struct {
                 },
                 .ptr => |ptr| switch (ptr.addr) {
                     .eu_payload, .opt_payload => |base| Value.fromInterned(base).canMutateComptimeVarState(mod),
+                    .anon_decl => |anon_decl| Value.fromInterned(anon_decl.val).canMutateComptimeVarState(mod),
+                    .elem, .field => |base_index| Value.fromInterned(base_index.base).canMutateComptimeVarState(mod),
                     else => false,
                 },
                 .opt => |opt| switch (opt.val) {
@@ -4050,7 +4064,7 @@ pub const Value = struct {
         const tags = @typeInfo(Tag).Enum.fields;
         var fields: [tags.len]std.builtin.Type.StructField = undefined;
         for (&fields, tags) |*field, t| field.* = .{
-            .name = t.name,
+            .name = t.name ++ "",
             .type = *@field(Tag, t.name).Type(),
             .default_value = null,
             .is_comptime = false,
