@@ -387,7 +387,9 @@ pub fn linkWithLLD(self: *Coff, arena: Allocator, prog_node: *std.Progress.Node)
                 "-SECTION:.xdata,D",
             }),
             .win32 => {
+                log.info("truncate {s}", .{link_in_crt});
                 if (link_in_crt) {
+                    log.info("is gnu {}", .{target.abi.isGnu()});
                     if (target.abi.isGnu()) {
                         try argv.append("-lldmingw");
 
@@ -476,6 +478,7 @@ pub fn linkWithLLD(self: *Coff, arena: Allocator, prog_node: *std.Progress.Node)
 
         try argv.ensureUnusedCapacity(comp.system_libs.count());
         for (comp.system_libs.keys()) |key| {
+            log.info("System lib: {s}", .{key});
             const lib_basename = try allocPrint(arena, "{s}.lib", .{key});
             if (comp.crt_files.get(lib_basename)) |crt_file| {
                 argv.appendAssumeCapacity(crt_file.full_object_path);
