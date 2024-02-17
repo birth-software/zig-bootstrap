@@ -3,9 +3,6 @@
 pub fn testAll(b: *Build, build_opts: BuildOptions) *Step {
     const macho_step = b.step("test-macho", "Run MachO tests");
 
-    const default_target = b.resolveTargetQuery(.{
-        .os_tag = .macos,
-    });
     const x86_64_target = b.resolveTargetQuery(.{
         .cpu_arch = .x86_64,
         .os_tag = .macos,
@@ -15,6 +12,21 @@ pub fn testAll(b: *Build, build_opts: BuildOptions) *Step {
         .os_tag = .macos,
     });
 
+    const default_target = switch (builtin.cpu.arch) {
+        .x86_64, .aarch64 => b.resolveTargetQuery(.{
+            .os_tag = .macos,
+        }),
+        else => aarch64_target,
+    };
+
+    // Exercise linker with self-hosted backend (no LLVM)
+    macho_step.dependOn(testEmptyZig(b, .{ .use_llvm = false, .target = x86_64_target }));
+    macho_step.dependOn(testHelloZig(b, .{ .use_llvm = false, .target = x86_64_target }));
+    macho_step.dependOn(testLinkingStaticLib(b, .{ .use_llvm = false, .target = x86_64_target }));
+    macho_step.dependOn(testReexportsZig(b, .{ .use_llvm = false, .target = x86_64_target }));
+    macho_step.dependOn(testRelocatableZig(b, .{ .use_llvm = false, .target = x86_64_target }));
+
+    // Exercise linker with LLVM backend
     macho_step.dependOn(testDeadStrip(b, .{ .target = default_target }));
     macho_step.dependOn(testEmptyObject(b, .{ .target = default_target }));
     macho_step.dependOn(testEmptyZig(b, .{ .target = default_target }));
@@ -24,6 +36,7 @@ pub fn testAll(b: *Build, build_opts: BuildOptions) *Step {
     macho_step.dependOn(testHelloZig(b, .{ .target = default_target }));
     macho_step.dependOn(testLargeBss(b, .{ .target = default_target }));
     macho_step.dependOn(testLayout(b, .{ .target = default_target }));
+    macho_step.dependOn(testLinkingStaticLib(b, .{ .target = default_target }));
     macho_step.dependOn(testLinksection(b, .{ .target = default_target }));
     macho_step.dependOn(testMhExecuteHeader(b, .{ .target = default_target }));
     macho_step.dependOn(testNoDeadStrip(b, .{ .target = default_target }));
@@ -834,6 +847,45 @@ fn testLinkDirectlyCppTbd(b: *Build, opts: Options) *Step {
     return test_step;
 }
 
+fn testLinkingStaticLib(b: *Build, opts: Options) *Step {
+    const test_step = addTestStep(b, "linking-static-lib", opts);
+
+    const obj = addObject(b, opts, .{
+        .name = "bobj",
+        .zig_source_bytes = "export var bar: i32 = -42;",
+        .strip = true, // TODO for self-hosted, we don't really emit any valid DWARF yet since we only export a global
+    });
+
+    const lib = addStaticLibrary(b, opts, .{
+        .name = "alib",
+        .zig_source_bytes =
+        \\export fn foo() i32 {
+        \\    return 42;
+        \\}
+        ,
+    });
+    lib.addObject(obj);
+
+    const exe = addExecutable(b, opts, .{
+        .name = "testlib",
+        .zig_source_bytes =
+        \\const std = @import("std");
+        \\extern fn foo() i32;
+        \\extern var bar: i32;
+        \\pub fn main() void {
+        \\    std.debug.print("{d}\n", .{foo() + bar});
+        \\}
+        ,
+    });
+    exe.linkLibrary(lib);
+
+    const run = addRunArtifact(exe);
+    run.expectStdErrEqual("0\n");
+    test_step.dependOn(&run.step);
+
+    return test_step;
+}
+
 fn testLinksection(b: *Build, opts: Options) *Step {
     const test_step = addTestStep(b, "macho-linksection", opts);
 
@@ -969,19 +1021,38 @@ fn testObjc(b: *Build, opts: Options) *Step {
     \\@end
     });
 
-    const exe = addExecutable(b, opts, .{ .name = "main", .c_source_bytes = "int main() { return 0; }" });
-    exe.root_module.linkSystemLibrary("a", .{});
-    exe.root_module.linkFramework("Foundation", .{});
-    exe.root_module.addLibraryPath(lib.getEmittedBinDirectory());
+    {
+        const exe = addExecutable(b, opts, .{ .name = "main", .c_source_bytes = "int main() { return 0; }" });
+        exe.root_module.linkSystemLibrary("a", .{});
+        exe.root_module.linkFramework("Foundation", .{});
+        exe.root_module.addLibraryPath(lib.getEmittedBinDirectory());
 
-    const check = exe.checkObject();
-    check.checkInSymtab();
-    check.checkContains("_OBJC_");
-    test_step.dependOn(&check.step);
+        const check = exe.checkObject();
+        check.checkInSymtab();
+        check.checkNotPresent("_OBJC_");
+        test_step.dependOn(&check.step);
 
-    const run = addRunArtifact(exe);
-    run.expectExitCode(0);
-    test_step.dependOn(&run.step);
+        const run = addRunArtifact(exe);
+        run.expectExitCode(0);
+        test_step.dependOn(&run.step);
+    }
+
+    {
+        const exe = addExecutable(b, opts, .{ .name = "main2", .c_source_bytes = "int main() { return 0; }" });
+        exe.root_module.linkSystemLibrary("a", .{});
+        exe.root_module.linkFramework("Foundation", .{});
+        exe.root_module.addLibraryPath(lib.getEmittedBinDirectory());
+        exe.force_load_objc = true;
+
+        const check = exe.checkObject();
+        check.checkInSymtab();
+        check.checkContains("_OBJC_");
+        test_step.dependOn(&check.step);
+
+        const run = addRunArtifact(exe);
+        run.expectExitCode(0);
+        test_step.dependOn(&run.step);
+    }
 
     return test_step;
 }
@@ -2288,6 +2359,7 @@ fn addTestStep(b: *Build, comptime prefix: []const u8, opts: Options) *Step {
     return link.addTestStep(b, "macho-" ++ prefix, opts);
 }
 
+const builtin = @import("builtin");
 const addAsmSourceBytes = link.addAsmSourceBytes;
 const addCSourceBytes = link.addCSourceBytes;
 const addRunArtifact = link.addRunArtifact;

@@ -7,7 +7,7 @@ const log = std.log.scoped(.c);
 const link = @import("../link.zig");
 const Module = @import("../Module.zig");
 const Compilation = @import("../Compilation.zig");
-const Value = @import("../value.zig").Value;
+const Value = @import("../Value.zig");
 const Type = @import("../type.zig").Type;
 const TypedValue = @import("../TypedValue.zig");
 const C = link.File.C;
@@ -306,7 +306,7 @@ pub const Function = struct {
         const ty = f.typeOf(ref);
 
         const result: CValue = if (lowersToArray(ty, mod)) result: {
-            const writer = f.object.code_header.writer();
+            const writer = f.object.codeHeaderWriter();
             const alignment: Alignment = .none;
             const decl_c_value = try f.allocLocalValue(ty, alignment);
             const gpa = f.object.dg.gpa;
@@ -534,6 +534,10 @@ pub const Object = struct {
     fn writer(o: *Object) IndentWriter(std.ArrayList(u8).Writer).Writer {
         return o.indent_writer.writer();
     }
+
+    fn codeHeaderWriter(o: *Object) ArrayListWriter {
+        return arrayListWriter(&o.code_header);
+    }
 };
 
 /// This data is available both when outputting .c code and when outputting an .h file.
@@ -556,6 +560,10 @@ pub const DeclGen = struct {
         anon: InternPool.Index,
         flush,
     };
+
+    fn fwdDeclWriter(dg: *DeclGen) ArrayListWriter {
+        return arrayListWriter(&dg.fwd_decl);
+    }
 
     fn fail(dg: *DeclGen, comptime format: []const u8, args: anytype) error{ AnalysisFail, OutOfMemory } {
         @setCold(true);
@@ -1207,50 +1215,35 @@ pub const DeclGen = struct {
                 try writer.print("{x}", .{try dg.fmtIntLiteral(repr_ty, repr_val, location)});
                 if (!empty) try writer.writeByte(')');
             },
-            .ptr => |ptr| {
-                if (ptr.len != .none) {
-                    if (!location.isInitializer()) {
-                        try writer.writeByte('(');
-                        try dg.renderType(writer, ty);
-                        try writer.writeByte(')');
-                    }
-                    try writer.writeByte('{');
+            .slice => |slice| {
+                if (!location.isInitializer()) {
+                    try writer.writeByte('(');
+                    try dg.renderType(writer, ty);
+                    try writer.writeByte(')');
                 }
-                const ptr_location = switch (ptr.len) {
-                    .none => location,
-                    else => initializer_type,
-                };
-                const ptr_ty = switch (ptr.len) {
-                    .none => ty,
-                    else => ty.slicePtrFieldType(mod),
-                };
-                const ptr_val = switch (ptr.len) {
-                    .none => val,
-                    else => val.slicePtr(mod),
-                };
-                switch (ptr.addr) {
-                    .decl => |d| try dg.renderDeclValue(writer, ptr_ty, ptr_val, d, ptr_location),
-                    .mut_decl => |md| try dg.renderDeclValue(writer, ptr_ty, ptr_val, md.decl, ptr_location),
-                    .anon_decl => |decl_val| try dg.renderAnonDeclValue(writer, ptr_ty, ptr_val, decl_val, ptr_location),
-                    .int => |int| {
-                        try writer.writeAll("((");
-                        try dg.renderType(writer, ptr_ty);
-                        try writer.print("){x})", .{
-                            try dg.fmtIntLiteral(Type.usize, Value.fromInterned(int), ptr_location),
-                        });
-                    },
-                    .eu_payload,
-                    .opt_payload,
-                    .elem,
-                    .field,
-                    => try dg.renderParentPtr(writer, ptr_val.ip_index, ptr_location),
-                    .comptime_field => unreachable,
-                }
-                if (ptr.len != .none) {
-                    try writer.writeAll(", ");
-                    try dg.renderValue(writer, Type.usize, Value.fromInterned(ptr.len), initializer_type);
-                    try writer.writeByte('}');
-                }
+                try writer.writeByte('{');
+                try dg.renderValue(writer, ty.slicePtrFieldType(mod), Value.fromInterned(slice.ptr), initializer_type);
+                try writer.writeAll(", ");
+                try dg.renderValue(writer, Type.usize, Value.fromInterned(slice.len), initializer_type);
+                try writer.writeByte('}');
+            },
+            .ptr => |ptr| switch (ptr.addr) {
+                .decl => |d| try dg.renderDeclValue(writer, ty, val, d, location),
+                .mut_decl => |md| try dg.renderDeclValue(writer, ty, val, md.decl, location),
+                .anon_decl => |decl_val| try dg.renderAnonDeclValue(writer, ty, val, decl_val, location),
+                .int => |int| {
+                    try writer.writeAll("((");
+                    try dg.renderType(writer, ty);
+                    try writer.print("){x})", .{
+                        try dg.fmtIntLiteral(Type.usize, Value.fromInterned(int), location),
+                    });
+                },
+                .eu_payload,
+                .opt_payload,
+                .elem,
+                .field,
+                => try dg.renderParentPtr(writer, val.ip_index, location),
+                .comptime_field => unreachable,
             },
             .opt => |opt| {
                 const payload_ty = ty.optionalChild(mod);
@@ -1997,7 +1990,7 @@ pub const DeclGen = struct {
         fwd_kind: enum { tentative, final },
     ) !void {
         const decl = dg.module.declPtr(decl_index);
-        const fwd = dg.fwd_decl.writer();
+        const fwd = dg.fwdDeclWriter();
         const is_global = variable.is_extern or dg.declIsGlobal(.{ .ty = decl.ty, .val = decl.val });
         try fwd.writeAll(if (is_global) "zig_extern " else "static ");
         const maybe_exports = dg.module.decl_exports.get(decl_index);
@@ -2602,6 +2595,7 @@ pub fn genGlobalAsm(mod: *Module, writer: anytype) !void {
 
 pub fn genErrDecls(o: *Object) !void {
     const mod = o.dg.module;
+    const ip = &mod.intern_pool;
     const writer = o.writer();
 
     var max_name_len: usize = 0;
@@ -2610,7 +2604,7 @@ pub fn genErrDecls(o: *Object) !void {
         try writer.writeAll("enum {\n");
         o.indent_writer.pushIndent();
         for (mod.global_error_set.keys()[1..], 1..) |name_nts, value| {
-            const name = mod.intern_pool.stringToSlice(name_nts);
+            const name = ip.stringToSlice(name_nts);
             max_name_len = @max(name.len, max_name_len);
             const err_val = try mod.intern(.{ .err = .{
                 .ty = .anyerror_type,
@@ -2628,8 +2622,8 @@ pub fn genErrDecls(o: *Object) !void {
     defer o.dg.gpa.free(name_buf);
 
     @memcpy(name_buf[0..name_prefix.len], name_prefix);
-    for (mod.global_error_set.keys()) |name_nts| {
-        const name = mod.intern_pool.stringToSlice(name_nts);
+    for (mod.global_error_set.keys()) |name_ip| {
+        const name = ip.stringToSlice(name_ip);
         @memcpy(name_buf[name_prefix.len..][0..name.len], name);
         const identifier = name_buf[0 .. name_prefix.len + name.len];
 
@@ -2659,7 +2653,7 @@ pub fn genErrDecls(o: *Object) !void {
     try o.dg.renderTypeAndName(writer, name_array_ty, .{ .identifier = array_identifier }, Const, .none, .complete);
     try writer.writeAll(" = {");
     for (mod.global_error_set.keys(), 0..) |name_nts, value| {
-        const name = mod.intern_pool.stringToSlice(name_nts);
+        const name = ip.stringToSlice(name_nts);
         if (value != 0) try writer.writeByte(',');
 
         const len_val = try mod.intValue(Type.usize, name.len);
@@ -2683,7 +2677,7 @@ fn genExports(o: *Object) !void {
     };
     const decl = mod.declPtr(decl_index);
     const tv: TypedValue = .{ .ty = decl.ty, .val = Value.fromInterned((try decl.internValue(mod))) };
-    const fwd = o.dg.fwd_decl.writer();
+    const fwd = o.dg.fwdDeclWriter();
 
     const exports = mod.decl_exports.get(decl_index) orelse return;
     if (exports.items.len < 2) return;
@@ -2737,6 +2731,7 @@ fn genExports(o: *Object) !void {
 
 pub fn genLazyFn(o: *Object, lazy_fn: LazyFnMap.Entry) !void {
     const mod = o.dg.module;
+    const ip = &mod.intern_pool;
     const w = o.writer();
     const key = lazy_fn.key_ptr.*;
     const val = lazy_fn.value_ptr;
@@ -2754,23 +2749,23 @@ pub fn genLazyFn(o: *Object, lazy_fn: LazyFnMap.Entry) !void {
             try w.writeByte('(');
             try o.dg.renderTypeAndName(w, enum_ty, .{ .identifier = "tag" }, Const, .none, .complete);
             try w.writeAll(") {\n switch (tag) {\n");
-            for (enum_ty.enumFields(mod), 0..) |name_ip, index_usize| {
-                const index = @as(u32, @intCast(index_usize));
-                const name = mod.intern_pool.stringToSlice(name_ip);
-                const tag_val = try mod.enumValueFieldIndex(enum_ty, index);
+            const tag_names = enum_ty.enumFields(mod);
+            for (0..tag_names.len) |tag_index| {
+                const tag_name = ip.stringToSlice(tag_names.get(ip)[tag_index]);
+                const tag_val = try mod.enumValueFieldIndex(enum_ty, @intCast(tag_index));
 
                 const int_val = try tag_val.intFromEnum(enum_ty, mod);
 
                 const name_ty = try mod.arrayType(.{
-                    .len = name.len,
+                    .len = tag_name.len,
                     .child = .u8_type,
                     .sentinel = .zero_u8,
                 });
                 const name_val = try mod.intern(.{ .aggregate = .{
                     .ty = name_ty.toIntern(),
-                    .storage = .{ .bytes = name },
+                    .storage = .{ .bytes = tag_name },
                 } });
-                const len_val = try mod.intValue(Type.usize, name.len);
+                const len_val = try mod.intValue(Type.usize, tag_name.len);
 
                 try w.print("  case {}: {{\n   static ", .{
                     try o.dg.fmtIntLiteral(enum_ty, int_val, .Other),
@@ -2797,7 +2792,7 @@ pub fn genLazyFn(o: *Object, lazy_fn: LazyFnMap.Entry) !void {
             const fn_cty = try o.dg.typeToCType(fn_decl.ty, .complete);
             const fn_info = fn_cty.cast(CType.Payload.Function).?.data;
 
-            const fwd_decl_writer = o.dg.fwd_decl.writer();
+            const fwd_decl_writer = o.dg.fwdDeclWriter();
             try fwd_decl_writer.print("static zig_{s} ", .{@tagName(key)});
             try o.dg.renderFunctionSignature(
                 fwd_decl_writer,
@@ -2839,7 +2834,7 @@ pub fn genFunc(f: *Function) !void {
     defer o.code_header.deinit();
 
     const is_global = o.dg.declIsGlobal(tv);
-    const fwd_decl_writer = o.dg.fwd_decl.writer();
+    const fwd_decl_writer = o.dg.fwdDeclWriter();
     try fwd_decl_writer.writeAll(if (is_global) "zig_extern " else "static ");
 
     if (mod.decl_exports.get(decl_index)) |exports|
@@ -2894,7 +2889,7 @@ pub fn genFunc(f: *Function) !void {
     };
     free_locals.sort(SortContext{ .keys = free_locals.keys() });
 
-    const w = o.code_header.writer();
+    const w = o.codeHeaderWriter();
     for (free_locals.values()) |list| {
         for (list.keys()) |local_index| {
             const local = f.locals.items[local_index];
@@ -2922,7 +2917,7 @@ pub fn genDecl(o: *Object) !void {
 
     if (!tv.ty.isFnOrHasRuntimeBitsIgnoreComptime(mod)) return;
     if (tv.val.getExternFunc(mod)) |_| {
-        const fwd_decl_writer = o.dg.fwd_decl.writer();
+        const fwd_decl_writer = o.dg.fwdDeclWriter();
         try fwd_decl_writer.writeAll("zig_extern ");
         try o.dg.renderFunctionSignature(fwd_decl_writer, decl_index, .forward, .{ .export_index = 0 });
         try fwd_decl_writer.writeAll(";\n");
@@ -2963,7 +2958,7 @@ pub fn genDeclValue(
     link_section: InternPool.OptionalNullTerminatedString,
 ) !void {
     const mod = o.dg.module;
-    const fwd_decl_writer = o.dg.fwd_decl.writer();
+    const fwd_decl_writer = o.dg.fwdDeclWriter();
 
     try fwd_decl_writer.writeAll(if (is_global) "zig_extern " else "static ");
     try o.dg.renderTypeAndName(fwd_decl_writer, tv.ty, decl_c_value, Const, alignment, .complete);
@@ -3007,7 +3002,7 @@ pub fn genHeader(dg: *DeclGen) error{ AnalysisFail, OutOfMemory }!void {
         .ty = decl.ty,
         .val = decl.val,
     };
-    const writer = dg.fwd_decl.writer();
+    const writer = dg.fwdDeclWriter();
 
     switch (tv.ty.zigTypeTag(mod)) {
         .Fn => if (dg.declIsGlobal(tv)) {
@@ -7532,11 +7527,25 @@ fn toAtomicRmwSuffix(order: std.builtin.AtomicRmwOp) []const u8 {
     };
 }
 
+const ArrayListWriter = ErrorOnlyGenericWriter(std.ArrayList(u8).Writer.Error);
+
+fn arrayListWriter(list: *std.ArrayList(u8)) ArrayListWriter {
+    return .{ .context = .{
+        .context = list,
+        .writeFn = struct {
+            fn write(context: *const anyopaque, bytes: []const u8) anyerror!usize {
+                const l: *std.ArrayList(u8) = @alignCast(@constCast(@ptrCast(context)));
+                return l.writer().write(bytes);
+            }
+        }.write,
+    } };
+}
+
 fn IndentWriter(comptime UnderlyingWriter: type) type {
     return struct {
         const Self = @This();
         pub const Error = UnderlyingWriter.Error;
-        pub const Writer = std.io.Writer(*Self, Error, write);
+        pub const Writer = ErrorOnlyGenericWriter(Error);
 
         pub const indent_delta = 1;
 
@@ -7545,7 +7554,10 @@ fn IndentWriter(comptime UnderlyingWriter: type) type {
         current_line_empty: bool = true,
 
         pub fn writer(self: *Self) Writer {
-            return .{ .context = self };
+            return .{ .context = .{
+                .context = self,
+                .writeFn = writeAny,
+            } };
         }
 
         pub fn write(self: *Self, bytes: []const u8) Error!usize {
@@ -7558,6 +7570,11 @@ fn IndentWriter(comptime UnderlyingWriter: type) type {
             self.current_line_empty = false;
 
             return self.writeNoIndent(bytes);
+        }
+
+        fn writeAny(context: *const anyopaque, bytes: []const u8) anyerror!usize {
+            const self: *Self = @alignCast(@constCast(@ptrCast(context)));
+            return self.write(bytes);
         }
 
         pub fn insertNewline(self: *Self) Error!void {
@@ -7583,6 +7600,18 @@ fn IndentWriter(comptime UnderlyingWriter: type) type {
             return bytes.len;
         }
     };
+}
+
+/// A wrapper around `std.io.AnyWriter` that maintains a generic error set while
+/// erasing the rest of the implementation. This is intended to avoid duplicate
+/// generic instantiations for writer types which share the same error set, while
+/// maintaining ease of error handling.
+fn ErrorOnlyGenericWriter(comptime Error: type) type {
+    return std.io.GenericWriter(std.io.AnyWriter, Error, struct {
+        fn write(context: std.io.AnyWriter, bytes: []const u8) Error!usize {
+            return @errorCast(context.write(bytes));
+        }
+    }.write);
 }
 
 fn toCIntBits(zig_bits: u32) ?u32 {

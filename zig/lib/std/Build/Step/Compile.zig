@@ -55,7 +55,6 @@ global_base: ?u64 = null,
 zig_lib_dir: ?LazyPath,
 exec_cmd_args: ?[]const ?[]const u8,
 filter: ?[]const u8,
-test_evented_io: bool = false,
 test_runner: ?[]const u8,
 test_server_mode: bool,
 wasi_exec_model: ?std.builtin.WasiExecModel = null,
@@ -148,6 +147,9 @@ headerpad_max_install_names: bool = false,
 
 /// (Darwin) Remove dylibs that are unreachable by the entry point or exported symbols.
 dead_strip_dylibs: bool = false,
+
+/// (Darwin) Force load all members of static archives that implement an Objective-C class or category
+force_load_objc: bool = false,
 
 /// Position Independent Executable
 pie: ?bool = null,
@@ -920,7 +922,7 @@ fn make(step: *Step, prog_node: *std.Progress.Node) !void {
     var zig_args = ArrayList([]const u8).init(arena);
     defer zig_args.deinit();
 
-    try zig_args.append(b.zig_exe);
+    try zig_args.append(b.graph.zig_exe);
 
     const cmd = switch (self.kind) {
         .lib => "build-lib",
@@ -929,6 +931,16 @@ fn make(step: *Step, prog_node: *std.Progress.Node) !void {
         .@"test" => "test",
     };
     try zig_args.append(cmd);
+
+    if (!mem.eql(u8, b.graph.host_query_options.arch_os_abi, "native")) {
+        try zig_args.appendSlice(&.{ "--host-target", b.graph.host_query_options.arch_os_abi });
+    }
+    if (b.graph.host_query_options.cpu_features) |cpu| {
+        try zig_args.appendSlice(&.{ "--host-cpu", cpu });
+    }
+    if (b.graph.host_query_options.dynamic_linker) |dl| {
+        try zig_args.appendSlice(&.{ "--host-dynamic-linker", dl });
+    }
 
     if (b.reference_trace) |some| {
         try zig_args.append(try std.fmt.allocPrint(arena, "-freference-trace={d}", .{some}));
@@ -1294,10 +1306,6 @@ fn make(step: *Step, prog_node: *std.Progress.Node) !void {
         try zig_args.append(filter);
     }
 
-    if (self.test_evented_io) {
-        try zig_args.append("--test-evented-io");
-    }
-
     if (self.test_runner) |test_runner| {
         try zig_args.append("--test-runner");
         try zig_args.append(b.pathFromRoot(test_runner));
@@ -1390,7 +1398,7 @@ fn make(step: *Step, prog_node: *std.Progress.Node) !void {
     try zig_args.append(b.cache_root.path orelse ".");
 
     try zig_args.append("--global-cache-dir");
-    try zig_args.append(b.global_cache_root.path orelse ".");
+    try zig_args.append(b.graph.global_cache_root.path orelse ".");
 
     try zig_args.append("--name");
     try zig_args.append(self.name);
@@ -1432,6 +1440,9 @@ fn make(step: *Step, prog_node: *std.Progress.Node) !void {
     }
     if (self.dead_strip_dylibs) {
         try zig_args.append("-dead_strip_dylibs");
+    }
+    if (self.force_load_objc) {
+        try zig_args.append("-ObjC");
     }
 
     try addFlag(&zig_args, "compiler-rt", self.bundle_compiler_rt);

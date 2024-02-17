@@ -21,7 +21,7 @@ const Package = @import("../Package.zig");
 const TypedValue = @import("../TypedValue.zig");
 const Air = @import("../Air.zig");
 const Liveness = @import("../Liveness.zig");
-const Value = @import("../value.zig").Value;
+const Value = @import("../Value.zig");
 const Type = @import("../type.zig").Type;
 const LazySrcLoc = Module.LazySrcLoc;
 const x86_64_abi = @import("../arch/x86_64/abi.zig");
@@ -1928,17 +1928,26 @@ pub const Object = struct {
         const gop = try o.di_type_map.getOrPut(gpa, ty.toIntern());
         if (gop.found_existing) {
             const annotated = gop.value_ptr.*;
-            const di_type = annotated.toDIType();
-            if (!annotated.isFwdOnly() or resolve == .fwd) {
-                return di_type;
+            switch (annotated) {
+                // This type is currently attempting to be resolved fully, so make
+                // sure a second recursion through the types uses forward resolution.
+                .null => assert(resolve == .fwd),
+                // This type already has at least forward resolution, only resolve
+                // fully during full resolution.
+                _ => {
+                    const di_type = annotated.toDIType();
+                    if (!annotated.isFwdOnly() or resolve == .fwd) {
+                        return di_type;
+                    }
+                    const entry: Object.DITypeMap.Entry = .{
+                        .key_ptr = gop.key_ptr,
+                        .value_ptr = gop.value_ptr,
+                    };
+                    return o.lowerDebugTypeImpl(entry, resolve, di_type);
+                },
             }
-            const entry: Object.DITypeMap.Entry = .{
-                .key_ptr = gop.key_ptr,
-                .value_ptr = gop.value_ptr,
-            };
-            return o.lowerDebugTypeImpl(entry, resolve, di_type);
-        }
-        errdefer assert(o.di_type_map.orderedRemove(ty.toIntern()));
+        } else gop.value_ptr.* = .null;
+        errdefer if (!gop.found_existing) assert(o.di_type_map.orderedRemove(ty.toIntern()));
         const entry: Object.DITypeMap.Entry = .{
             .key_ptr = gop.key_ptr,
             .value_ptr = gop.value_ptr,
@@ -2041,7 +2050,7 @@ pub const Object = struct {
                     ty.abiAlignment(mod).toByteUnits(0) * 8,
                     enumerators.ptr,
                     @intCast(enumerators.len),
-                    try o.lowerDebugType(int_ty, .full),
+                    try o.lowerDebugType(int_ty, resolve),
                     "",
                 );
                 // The recursive call to `lowerDebugType` means we can't use `gop` anymore.
@@ -2139,7 +2148,7 @@ pub const Object = struct {
                             ptr_align.toByteUnits(0) * 8, // align in bits
                             0, // offset in bits
                             0, // flags
-                            try o.lowerDebugType(ptr_ty, .full),
+                            try o.lowerDebugType(ptr_ty, resolve),
                         ),
                         dib.createMemberType(
                             fwd_decl.toScope(),
@@ -2150,7 +2159,7 @@ pub const Object = struct {
                             len_align.toByteUnits(0) * 8, // align in bits
                             len_offset * 8, // offset in bits
                             0, // flags
-                            try o.lowerDebugType(len_ty, .full),
+                            try o.lowerDebugType(len_ty, resolve),
                         ),
                     };
 
@@ -2214,7 +2223,7 @@ pub const Object = struct {
                 const array_di_ty = dib.createArrayType(
                     ty.abiSize(mod) * 8,
                     ty.abiAlignment(mod).toByteUnits(0) * 8,
-                    try o.lowerDebugType(ty.childType(mod), .full),
+                    try o.lowerDebugType(ty.childType(mod), resolve),
                     @intCast(ty.arrayLen(mod)),
                 );
                 // The recursive call to `lowerDebugType` means we can't use `gop` anymore.
@@ -2240,7 +2249,7 @@ pub const Object = struct {
                         break :blk dib.createBasicType(name, info.bits, dwarf_encoding);
                     },
                     .Bool => dib.createBasicType("bool", 1, DW.ATE.boolean),
-                    else => try o.lowerDebugType(ty.childType(mod), .full),
+                    else => try o.lowerDebugType(ty.childType(mod), resolve),
                 };
 
                 const vector_di_ty = dib.createVectorType(
@@ -2307,7 +2316,7 @@ pub const Object = struct {
                         payload_align.toByteUnits(0) * 8, // align in bits
                         0, // offset in bits
                         0, // flags
-                        try o.lowerDebugType(child_ty, .full),
+                        try o.lowerDebugType(child_ty, resolve),
                     ),
                     dib.createMemberType(
                         fwd_decl.toScope(),
@@ -2318,7 +2327,7 @@ pub const Object = struct {
                         non_null_align.toByteUnits(0) * 8, // align in bits
                         non_null_offset * 8, // offset in bits
                         0, // flags
-                        try o.lowerDebugType(non_null_ty, .full),
+                        try o.lowerDebugType(non_null_ty, resolve),
                     ),
                 };
 
@@ -2345,7 +2354,7 @@ pub const Object = struct {
             .ErrorUnion => {
                 const payload_ty = ty.errorUnionPayload(mod);
                 if (!payload_ty.hasRuntimeBitsIgnoreComptime(mod)) {
-                    const err_set_di_ty = try o.lowerDebugType(Type.anyerror, .full);
+                    const err_set_di_ty = try o.lowerDebugType(Type.anyerror, resolve);
                     // The recursive call to `lowerDebugType` means we can't use `gop` anymore.
                     try o.di_type_map.put(gpa, ty.toIntern(), AnnotatedDITypePtr.initFull(err_set_di_ty));
                     return err_set_di_ty;
@@ -2399,7 +2408,7 @@ pub const Object = struct {
                     error_align.toByteUnits(0) * 8, // align in bits
                     error_offset * 8, // offset in bits
                     0, // flags
-                    try o.lowerDebugType(Type.anyerror, .full),
+                    try o.lowerDebugType(Type.anyerror, resolve),
                 );
                 fields[payload_index] = dib.createMemberType(
                     fwd_decl.toScope(),
@@ -2410,7 +2419,7 @@ pub const Object = struct {
                     payload_align.toByteUnits(0) * 8, // align in bits
                     payload_offset * 8, // offset in bits
                     0, // flags
-                    try o.lowerDebugType(payload_ty, .full),
+                    try o.lowerDebugType(payload_ty, resolve),
                 );
 
                 const full_di_ty = dib.createStructType(
@@ -2506,7 +2515,7 @@ pub const Object = struct {
                                 field_align.toByteUnits(0) * 8, // align in bits
                                 field_offset * 8, // offset in bits
                                 0, // flags
-                                try o.lowerDebugType(Type.fromInterned(field_ty), .full),
+                                try o.lowerDebugType(Type.fromInterned(field_ty), resolve),
                             ));
                         }
 
@@ -2584,7 +2593,7 @@ pub const Object = struct {
                     const field_name = struct_type.fieldName(ip, field_index).unwrap() orelse
                         try ip.getOrPutStringFmt(gpa, "{d}", .{field_index});
 
-                    const field_di_ty = try o.lowerDebugType(field_ty, .full);
+                    const field_di_ty = try o.lowerDebugType(field_ty, resolve);
 
                     try di_fields.append(gpa, dib.createMemberType(
                         fwd_decl.toScope(),
@@ -2653,7 +2662,7 @@ pub const Object = struct {
                 const layout = mod.getUnionLayout(union_obj);
 
                 if (layout.payload_size == 0) {
-                    const tag_di_ty = try o.lowerDebugType(Type.fromInterned(union_obj.enum_tag_ty), .full);
+                    const tag_di_ty = try o.lowerDebugType(Type.fromInterned(union_obj.enum_tag_ty), resolve);
                     const di_fields = [_]*llvm.DIType{tag_di_ty};
                     const full_di_ty = dib.createStructType(
                         compile_unit_scope,
@@ -2689,7 +2698,7 @@ pub const Object = struct {
                     const field_size = Type.fromInterned(field_ty).abiSize(mod);
                     const field_align = mod.unionFieldNormalAlignment(union_obj, @intCast(field_index));
 
-                    const field_di_ty = try o.lowerDebugType(Type.fromInterned(field_ty), .full);
+                    const field_di_ty = try o.lowerDebugType(Type.fromInterned(field_ty), resolve);
                     const field_name = union_obj.field_names.get(ip)[field_index];
                     di_fields.appendAssumeCapacity(dib.createMemberType(
                         fwd_decl.toScope(),
@@ -2751,7 +2760,7 @@ pub const Object = struct {
                     layout.tag_align.toByteUnits(0) * 8,
                     tag_offset * 8, // offset in bits
                     0, // flags
-                    try o.lowerDebugType(Type.fromInterned(union_obj.enum_tag_ty), .full),
+                    try o.lowerDebugType(Type.fromInterned(union_obj.enum_tag_ty), resolve),
                 );
 
                 const payload_di = dib.createMemberType(
@@ -2802,21 +2811,21 @@ pub const Object = struct {
                 if (Type.fromInterned(fn_info.return_type).hasRuntimeBitsIgnoreComptime(mod)) {
                     const sret = firstParamSRet(fn_info, mod);
                     const di_ret_ty = if (sret) Type.void else Type.fromInterned(fn_info.return_type);
-                    try param_di_types.append(try o.lowerDebugType(di_ret_ty, .full));
+                    try param_di_types.append(try o.lowerDebugType(di_ret_ty, resolve));
 
                     if (sret) {
                         const ptr_ty = try mod.singleMutPtrType(Type.fromInterned(fn_info.return_type));
-                        try param_di_types.append(try o.lowerDebugType(ptr_ty, .full));
+                        try param_di_types.append(try o.lowerDebugType(ptr_ty, resolve));
                     }
                 } else {
-                    try param_di_types.append(try o.lowerDebugType(Type.void, .full));
+                    try param_di_types.append(try o.lowerDebugType(Type.void, resolve));
                 }
 
                 if (Type.fromInterned(fn_info.return_type).isError(mod) and
                     o.module.comp.config.any_error_tracing)
                 {
                     const ptr_ty = try mod.singleMutPtrType(try o.getStackTraceType());
-                    try param_di_types.append(try o.lowerDebugType(ptr_ty, .full));
+                    try param_di_types.append(try o.lowerDebugType(ptr_ty, resolve));
                 }
 
                 for (0..fn_info.param_types.len) |i| {
@@ -2825,9 +2834,9 @@ pub const Object = struct {
 
                     if (isByRef(param_ty, mod)) {
                         const ptr_ty = try mod.singleMutPtrType(param_ty);
-                        try param_di_types.append(try o.lowerDebugType(ptr_ty, .full));
+                        try param_di_types.append(try o.lowerDebugType(ptr_ty, resolve));
                     } else {
-                        try param_di_types.append(try o.lowerDebugType(param_ty, .full));
+                        try param_di_types.append(try o.lowerDebugType(param_ty, resolve));
                     }
                 }
 
@@ -3644,6 +3653,7 @@ pub const Object = struct {
                 .empty_enum_value,
                 .float,
                 .ptr,
+                .slice,
                 .opt,
                 .aggregate,
                 .un,
@@ -3872,30 +3882,22 @@ pub const Object = struct {
                 128 => try o.builder.fp128Const(val.toFloat(f128, mod)),
                 else => unreachable,
             },
-            .ptr => |ptr| {
-                const ptr_ty = switch (ptr.len) {
-                    .none => ty,
-                    else => ty.slicePtrFieldType(mod),
-                };
-                const ptr_val = switch (ptr.addr) {
-                    .decl => |decl| try o.lowerDeclRefValue(ptr_ty, decl),
-                    .mut_decl => |mut_decl| try o.lowerDeclRefValue(ptr_ty, mut_decl.decl),
-                    .anon_decl => |anon_decl| try o.lowerAnonDeclRef(ptr_ty, anon_decl),
-                    .int => |int| try o.lowerIntAsPtr(int),
-                    .eu_payload,
-                    .opt_payload,
-                    .elem,
-                    .field,
-                    => try o.lowerParentPtr(val),
-                    .comptime_field => unreachable,
-                };
-                switch (ptr.len) {
-                    .none => return ptr_val,
-                    else => return o.builder.structConst(try o.lowerType(ty), &.{
-                        ptr_val, try o.lowerValue(ptr.len),
-                    }),
-                }
+            .ptr => |ptr| return switch (ptr.addr) {
+                .decl => |decl| try o.lowerDeclRefValue(ty, decl),
+                .mut_decl => |mut_decl| try o.lowerDeclRefValue(ty, mut_decl.decl),
+                .anon_decl => |anon_decl| try o.lowerAnonDeclRef(ty, anon_decl),
+                .int => |int| try o.lowerIntAsPtr(int),
+                .eu_payload,
+                .opt_payload,
+                .elem,
+                .field,
+                => try o.lowerParentPtr(val),
+                .comptime_field => unreachable,
             },
+            .slice => |slice| return o.builder.structConst(try o.lowerType(ty), &.{
+                try o.lowerValue(slice.ptr),
+                try o.lowerValue(slice.len),
+            }),
             .opt => |opt| {
                 comptime assert(optional_layout_version == 3);
                 const payload_ty = ty.optionalChild(mod);
@@ -9572,6 +9574,7 @@ pub const FuncGen = struct {
     fn airErrorSetHasValue(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
         const o = self.dg.object;
         const mod = o.module;
+        const ip = &mod.intern_pool;
         const ty_op = self.air.instructions.items(.data)[@intFromEnum(inst)].ty_op;
         const operand = try self.resolveInst(ty_op.operand);
         const error_set_ty = ty_op.ty.toType();
@@ -9583,8 +9586,8 @@ pub const FuncGen = struct {
         var wip_switch = try self.wip.@"switch"(operand, invalid_block, @intCast(names.len));
         defer wip_switch.finish(&self.wip);
 
-        for (names) |name| {
-            const err_int = mod.global_error_set.getIndex(name).?;
+        for (0..names.len) |name_index| {
+            const err_int = mod.global_error_set.getIndex(names.get(ip)[name_index]).?;
             const this_tag_int_value = try o.builder.intConst(try o.errorIntType(), err_int);
             try wip_switch.addCase(this_tag_int_value, valid_block, &self.wip);
         }
@@ -10855,6 +10858,7 @@ fn toLlvmCallConv(cc: std.builtin.CallingConvention, target: std.Target) Builder
             .amdgcn => .amdgpu_kernel,
             else => unreachable,
         },
+        .Vertex, .Fragment => unreachable,
     };
 }
 
@@ -11145,6 +11149,9 @@ fn lowerSystemVFnRetTy(o: *Object, fn_info: InternPool.Key.FuncType) Allocator.E
             .memory => unreachable, // handled above
             .win_i128 => unreachable, // windows only
             .none => break,
+            .integer_per_element => {
+                @panic("TODO");
+            },
         }
     }
     const first_non_integer = std.mem.indexOfNone(x86_64_abi.Class, &classes, &.{.integer});
@@ -11423,6 +11430,9 @@ const ParamTypeIterator = struct {
                 .memory => unreachable, // handled above
                 .win_i128 => unreachable, // windows only
                 .none => break,
+                .integer_per_element => {
+                    @panic("TODO");
+                },
             }
         }
         const first_non_integer = std.mem.indexOfNone(x86_64_abi.Class, &classes, &.{.integer});
@@ -11682,6 +11692,7 @@ const optional_layout_version = 3;
 /// whether the type is fully resolved. Types that are only fwd declared
 /// have the LSB flipped to a 1.
 const AnnotatedDITypePtr = enum(usize) {
+    null,
     _,
 
     fn initFwd(di_type: *llvm.DIType) AnnotatedDITypePtr {
@@ -11702,12 +11713,17 @@ const AnnotatedDITypePtr = enum(usize) {
     }
 
     fn toDIType(self: AnnotatedDITypePtr) *llvm.DIType {
-        const fixed_addr = @intFromEnum(self) & ~@as(usize, 1);
-        return @ptrFromInt(fixed_addr);
+        switch (self) {
+            .null => unreachable,
+            _ => return @ptrFromInt(@intFromEnum(self) & ~@as(usize, 1)),
+        }
     }
 
     fn isFwdOnly(self: AnnotatedDITypePtr) bool {
-        return @as(u1, @truncate(@intFromEnum(self))) != 0;
+        switch (self) {
+            .null => unreachable,
+            _ => return @as(u1, @truncate(@intFromEnum(self))) != 0,
+        }
     }
 };
 
