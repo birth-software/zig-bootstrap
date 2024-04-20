@@ -105,6 +105,29 @@ pub fn address(symbol: Symbol, opts: struct { plt: bool = true }, elf_file: *Elf
         return symbol.pltAddress(elf_file);
     }
     if (symbol.atom(elf_file)) |atom_ptr| {
+        if (!atom_ptr.flags.alive) {
+            if (mem.eql(u8, atom_ptr.name(elf_file), ".eh_frame")) {
+                const sym_name = symbol.name(elf_file);
+                if (mem.startsWith(u8, sym_name, "__EH_FRAME_BEGIN__") or
+                    mem.startsWith(u8, sym_name, "__EH_FRAME_LIST__") or
+                    mem.startsWith(u8, sym_name, ".eh_frame_seg") or
+                    symbol.elfSym(elf_file).st_type() == elf.STT_SECTION)
+                {
+                    return elf_file.shdrs.items[elf_file.eh_frame_section_index.?].sh_addr;
+                }
+
+                if (mem.startsWith(u8, sym_name, "__FRAME_END__") or
+                    mem.startsWith(u8, sym_name, "__EH_FRAME_LIST_END__"))
+                {
+                    const shdr = elf_file.shdrs.items[elf_file.eh_frame_section_index.?];
+                    return shdr.sh_addr + shdr.sh_size;
+                }
+
+                // TODO I think we potentially should error here
+            }
+
+            return 0;
+        }
         return atom_ptr.address(elf_file) + symbol.value;
     }
     return symbol.value;
@@ -139,14 +162,16 @@ pub fn pltGotAddress(symbol: Symbol, elf_file: *Elf) u64 {
     if (!(symbol.flags.has_plt and symbol.flags.has_got)) return 0;
     const extras = symbol.extra(elf_file).?;
     const shdr = elf_file.shdrs.items[elf_file.plt_got_section_index.?];
-    return shdr.sh_addr + extras.plt_got * 16;
+    const cpu_arch = elf_file.getTarget().cpu.arch;
+    return shdr.sh_addr + extras.plt_got * PltGotSection.entrySize(cpu_arch);
 }
 
 pub fn pltAddress(symbol: Symbol, elf_file: *Elf) u64 {
     if (!symbol.flags.has_plt) return 0;
     const extras = symbol.extra(elf_file).?;
     const shdr = elf_file.shdrs.items[elf_file.plt_section_index.?];
-    return shdr.sh_addr + extras.plt * 16 + PltSection.preamble_size;
+    const cpu_arch = elf_file.getTarget().cpu.arch;
+    return shdr.sh_addr + extras.plt * PltSection.entrySize(cpu_arch) + PltSection.preambleSize(cpu_arch);
 }
 
 pub fn gotPltAddress(symbol: Symbol, elf_file: *Elf) u64 {
@@ -251,7 +276,7 @@ pub fn setOutputSym(symbol: Symbol, elf_file: *Elf, out: *elf.Elf64_Sym) void {
             break :blk 0;
         }
         if (st_shndx == elf.SHN_ABS or st_shndx == elf.SHN_COMMON) break :blk symbol.address(.{ .plt = false }, elf_file);
-        const shdr = &elf_file.shdrs.items[st_shndx];
+        const shdr = elf_file.shdrs.items[st_shndx];
         if (shdr.sh_flags & elf.SHF_TLS != 0 and file_ptr != .linker_defined)
             break :blk symbol.address(.{ .plt = false }, elf_file) - elf_file.tlsAddress();
         break :blk symbol.address(.{ .plt = false }, elf_file);
@@ -430,6 +455,7 @@ pub const Index = u32;
 
 const assert = std.debug.assert;
 const elf = std.elf;
+const mem = std.mem;
 const std = @import("std");
 const synthetic_sections = @import("synthetic_sections.zig");
 
@@ -441,6 +467,7 @@ const GotPltSection = synthetic_sections.GotPltSection;
 const LinkerDefined = @import("LinkerDefined.zig");
 const Object = @import("Object.zig");
 const PltSection = synthetic_sections.PltSection;
+const PltGotSection = synthetic_sections.PltGotSection;
 const SharedObject = @import("SharedObject.zig");
 const Symbol = @This();
 const ZigGotSection = synthetic_sections.ZigGotSection;

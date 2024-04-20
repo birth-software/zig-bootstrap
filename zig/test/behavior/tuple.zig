@@ -135,7 +135,7 @@ test "array-like initializer for tuple types" {
     const T = @Type(.{
         .Struct = .{
             .is_tuple = true,
-            .layout = .Auto,
+            .layout = .auto,
             .decls = &.{},
             .fields = &.{
                 .{
@@ -222,7 +222,7 @@ test "fieldParentPtr of tuple" {
     var x: u32 = 0;
     _ = &x;
     const tuple = .{ x, x };
-    try testing.expect(&tuple == @fieldParentPtr(@TypeOf(tuple), "1", &tuple[1]));
+    try testing.expect(&tuple == @as(@TypeOf(&tuple), @fieldParentPtr("1", &tuple[1])));
 }
 
 test "fieldParentPtr of anon struct" {
@@ -233,7 +233,7 @@ test "fieldParentPtr of anon struct" {
     var x: u32 = 0;
     _ = &x;
     const anon_st = .{ .foo = x, .bar = x };
-    try testing.expect(&anon_st == @fieldParentPtr(@TypeOf(anon_st), "bar", &anon_st.bar));
+    try testing.expect(&anon_st == @as(@TypeOf(&anon_st), @fieldParentPtr("bar", &anon_st.bar)));
 }
 
 test "offsetOf tuple" {
@@ -323,7 +323,7 @@ test "zero sized struct in tuple handled correctly" {
         data: @Type(.{
             .Struct = .{
                 .is_tuple = true,
-                .layout = .Auto,
+                .layout = .auto,
                 .decls = &.{},
                 .fields = &.{.{
                     .name = "0",
@@ -471,7 +471,7 @@ test "coerce anon tuple to tuple" {
 
 test "empty tuple type" {
     const S = @Type(.{ .Struct = .{
-        .layout = .Auto,
+        .layout = .auto,
         .fields = &.{},
         .decls = &.{},
         .is_tuple = true,
@@ -559,4 +559,18 @@ test "comptime fields in tuple can be initialized" {
     const T = @TypeOf(.{ @as(i32, 0), @as(u32, 0) });
     var a: T = .{ 0, 0 };
     _ = &a;
+}
+
+test "tuple default values" {
+    const T = struct {
+        usize,
+        usize = 123,
+        usize = 456,
+    };
+
+    const t: T = .{1};
+
+    try expectEqual(1, t[0]);
+    try expectEqual(123, t[1]);
+    try expectEqual(456, t[2]);
 }

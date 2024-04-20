@@ -1392,13 +1392,13 @@ test "fieldParentPtr of a zero-bit field" {
             {
                 const a = A{ .u = 0 };
                 const b_ptr = &a.b;
-                const a_ptr = @fieldParentPtr(A, "b", b_ptr);
+                const a_ptr: *const A = @fieldParentPtr("b", b_ptr);
                 try std.testing.expectEqual(&a, a_ptr);
             }
             {
                 var a = A{ .u = 0 };
                 const b_ptr = &a.b;
-                const a_ptr = @fieldParentPtr(A, "b", b_ptr);
+                const a_ptr: *A = @fieldParentPtr("b", b_ptr);
                 try std.testing.expectEqual(&a, a_ptr);
             }
         }
@@ -1406,17 +1406,17 @@ test "fieldParentPtr of a zero-bit field" {
             {
                 const a = A{ .u = 0 };
                 const c_ptr = &a.b.c;
-                const b_ptr = @fieldParentPtr(@TypeOf(a.b), "c", c_ptr);
+                const b_ptr: @TypeOf(&a.b) = @fieldParentPtr("c", c_ptr);
                 try std.testing.expectEqual(&a.b, b_ptr);
-                const a_ptr = @fieldParentPtr(A, "b", b_ptr);
+                const a_ptr: *const A = @fieldParentPtr("b", b_ptr);
                 try std.testing.expectEqual(&a, a_ptr);
             }
             {
                 var a = A{ .u = 0 };
                 const c_ptr = &a.b.c;
-                const b_ptr = @fieldParentPtr(@TypeOf(a.b), "c", c_ptr);
+                const b_ptr: @TypeOf(&a.b) = @fieldParentPtr("c", c_ptr);
                 try std.testing.expectEqual(&a.b, b_ptr);
-                const a_ptr = @fieldParentPtr(A, "b", b_ptr);
+                const a_ptr: *const A = @fieldParentPtr("b", b_ptr);
                 try std.testing.expectEqual(&a, a_ptr);
             }
         }
@@ -2126,4 +2126,27 @@ test "struct containing optional pointer to array of @This()" {
     var s: S = .{ .x = &.{.{ .x = null }} };
     _ = &s;
     try expect(s.x.?[0].x == null);
+}
+
+test "matching captures causes struct equivalence" {
+    const S = struct {
+        fn UnsignedWrapper(comptime I: type) type {
+            const bits = @typeInfo(I).Int.bits;
+            return struct {
+                x: @Type(.{ .Int = .{
+                    .signedness = .unsigned,
+                    .bits = bits,
+                } }),
+            };
+        }
+    };
+
+    comptime assert(S.UnsignedWrapper(u8) == S.UnsignedWrapper(i8));
+    comptime assert(S.UnsignedWrapper(u16) == S.UnsignedWrapper(i16));
+    comptime assert(S.UnsignedWrapper(u8) != S.UnsignedWrapper(u16));
+
+    const a: S.UnsignedWrapper(u8) = .{ .x = 10 };
+    const b: S.UnsignedWrapper(i8) = .{ .x = 10 };
+    comptime assert(@TypeOf(a) == @TypeOf(b));
+    try expect(a.x == b.x);
 }

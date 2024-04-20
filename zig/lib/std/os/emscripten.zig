@@ -1,8 +1,8 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const wasi = std.os.wasi;
-const iovec = std.os.iovec;
-const iovec_const = std.os.iovec_const;
+const iovec = std.posix.iovec;
+const iovec_const = std.posix.iovec_const;
 const c = std.c;
 
 pub const FILE = c.FILE;
@@ -17,8 +17,8 @@ comptime {
     if (builtin.os.tag == .emscripten) {
         if (builtin.mode == .Debug or builtin.mode == .ReleaseSafe) {
             // Emscripten does not provide these symbols, so we must export our own
-            @export(__stack_chk_guard, .{ .name = "__stack_chk_guard", .linkage = .Strong });
-            @export(__stack_chk_fail, .{ .name = "__stack_chk_fail", .linkage = .Strong });
+            @export(__stack_chk_guard, .{ .name = "__stack_chk_guard", .linkage = .strong });
+            @export(__stack_chk_fail, .{ .name = "__stack_chk_fail", .linkage = .strong });
         }
     }
 }
@@ -155,85 +155,85 @@ pub fn CPU_COUNT(set: cpu_set_t) cpu_count_t {
 }
 
 pub const E = enum(u16) {
-    SUCCESS = @intFromEnum(wasi.E.SUCCESS),
-    @"2BIG" = @intFromEnum(wasi.E.@"2BIG"),
-    ACCES = @intFromEnum(wasi.E.ACCES),
-    ADDRINUSE = @intFromEnum(wasi.E.ADDRINUSE),
-    ADDRNOTAVAIL = @intFromEnum(wasi.E.ADDRNOTAVAIL),
-    AFNOSUPPORT = @intFromEnum(wasi.E.AFNOSUPPORT),
+    SUCCESS = @intFromEnum(wasi.errno_t.SUCCESS),
+    @"2BIG" = @intFromEnum(wasi.errno_t.@"2BIG"),
+    ACCES = @intFromEnum(wasi.errno_t.ACCES),
+    ADDRINUSE = @intFromEnum(wasi.errno_t.ADDRINUSE),
+    ADDRNOTAVAIL = @intFromEnum(wasi.errno_t.ADDRNOTAVAIL),
+    AFNOSUPPORT = @intFromEnum(wasi.errno_t.AFNOSUPPORT),
     /// This is also the error code used for `WOULDBLOCK`.
-    AGAIN = @intFromEnum(wasi.E.AGAIN),
-    ALREADY = @intFromEnum(wasi.E.ALREADY),
-    BADF = @intFromEnum(wasi.E.BADF),
-    BADMSG = @intFromEnum(wasi.E.BADMSG),
-    BUSY = @intFromEnum(wasi.E.BUSY),
-    CANCELED = @intFromEnum(wasi.E.CANCELED),
-    CHILD = @intFromEnum(wasi.E.CHILD),
-    CONNABORTED = @intFromEnum(wasi.E.CONNABORTED),
-    CONNREFUSED = @intFromEnum(wasi.E.CONNREFUSED),
-    CONNRESET = @intFromEnum(wasi.E.CONNRESET),
-    DEADLK = @intFromEnum(wasi.E.DEADLK),
-    DESTADDRREQ = @intFromEnum(wasi.E.DESTADDRREQ),
-    DOM = @intFromEnum(wasi.E.DOM),
-    DQUOT = @intFromEnum(wasi.E.DQUOT),
-    EXIST = @intFromEnum(wasi.E.EXIST),
-    FAULT = @intFromEnum(wasi.E.FAULT),
-    FBIG = @intFromEnum(wasi.E.FBIG),
-    HOSTUNREACH = @intFromEnum(wasi.E.HOSTUNREACH),
-    IDRM = @intFromEnum(wasi.E.IDRM),
-    ILSEQ = @intFromEnum(wasi.E.ILSEQ),
-    INPROGRESS = @intFromEnum(wasi.E.INPROGRESS),
-    INTR = @intFromEnum(wasi.E.INTR),
-    INVAL = @intFromEnum(wasi.E.INVAL),
-    IO = @intFromEnum(wasi.E.IO),
-    ISCONN = @intFromEnum(wasi.E.ISCONN),
-    ISDIR = @intFromEnum(wasi.E.ISDIR),
-    LOOP = @intFromEnum(wasi.E.LOOP),
-    MFILE = @intFromEnum(wasi.E.MFILE),
-    MLINK = @intFromEnum(wasi.E.MLINK),
-    MSGSIZE = @intFromEnum(wasi.E.MSGSIZE),
-    MULTIHOP = @intFromEnum(wasi.E.MULTIHOP),
-    NAMETOOLONG = @intFromEnum(wasi.E.NAMETOOLONG),
-    NETDOWN = @intFromEnum(wasi.E.NETDOWN),
-    NETRESET = @intFromEnum(wasi.E.NETRESET),
-    NETUNREACH = @intFromEnum(wasi.E.NETUNREACH),
-    NFILE = @intFromEnum(wasi.E.NFILE),
-    NOBUFS = @intFromEnum(wasi.E.NOBUFS),
-    NODEV = @intFromEnum(wasi.E.NODEV),
-    NOENT = @intFromEnum(wasi.E.NOENT),
-    NOEXEC = @intFromEnum(wasi.E.NOEXEC),
-    NOLCK = @intFromEnum(wasi.E.NOLCK),
-    NOLINK = @intFromEnum(wasi.E.NOLINK),
-    NOMEM = @intFromEnum(wasi.E.NOMEM),
-    NOMSG = @intFromEnum(wasi.E.NOMSG),
-    NOPROTOOPT = @intFromEnum(wasi.E.NOPROTOOPT),
-    NOSPC = @intFromEnum(wasi.E.NOSPC),
-    NOSYS = @intFromEnum(wasi.E.NOSYS),
-    NOTCONN = @intFromEnum(wasi.E.NOTCONN),
-    NOTDIR = @intFromEnum(wasi.E.NOTDIR),
-    NOTEMPTY = @intFromEnum(wasi.E.NOTEMPTY),
-    NOTRECOVERABLE = @intFromEnum(wasi.E.NOTRECOVERABLE),
-    NOTSOCK = @intFromEnum(wasi.E.NOTSOCK),
+    AGAIN = @intFromEnum(wasi.errno_t.AGAIN),
+    ALREADY = @intFromEnum(wasi.errno_t.ALREADY),
+    BADF = @intFromEnum(wasi.errno_t.BADF),
+    BADMSG = @intFromEnum(wasi.errno_t.BADMSG),
+    BUSY = @intFromEnum(wasi.errno_t.BUSY),
+    CANCELED = @intFromEnum(wasi.errno_t.CANCELED),
+    CHILD = @intFromEnum(wasi.errno_t.CHILD),
+    CONNABORTED = @intFromEnum(wasi.errno_t.CONNABORTED),
+    CONNREFUSED = @intFromEnum(wasi.errno_t.CONNREFUSED),
+    CONNRESET = @intFromEnum(wasi.errno_t.CONNRESET),
+    DEADLK = @intFromEnum(wasi.errno_t.DEADLK),
+    DESTADDRREQ = @intFromEnum(wasi.errno_t.DESTADDRREQ),
+    DOM = @intFromEnum(wasi.errno_t.DOM),
+    DQUOT = @intFromEnum(wasi.errno_t.DQUOT),
+    EXIST = @intFromEnum(wasi.errno_t.EXIST),
+    FAULT = @intFromEnum(wasi.errno_t.FAULT),
+    FBIG = @intFromEnum(wasi.errno_t.FBIG),
+    HOSTUNREACH = @intFromEnum(wasi.errno_t.HOSTUNREACH),
+    IDRM = @intFromEnum(wasi.errno_t.IDRM),
+    ILSEQ = @intFromEnum(wasi.errno_t.ILSEQ),
+    INPROGRESS = @intFromEnum(wasi.errno_t.INPROGRESS),
+    INTR = @intFromEnum(wasi.errno_t.INTR),
+    INVAL = @intFromEnum(wasi.errno_t.INVAL),
+    IO = @intFromEnum(wasi.errno_t.IO),
+    ISCONN = @intFromEnum(wasi.errno_t.ISCONN),
+    ISDIR = @intFromEnum(wasi.errno_t.ISDIR),
+    LOOP = @intFromEnum(wasi.errno_t.LOOP),
+    MFILE = @intFromEnum(wasi.errno_t.MFILE),
+    MLINK = @intFromEnum(wasi.errno_t.MLINK),
+    MSGSIZE = @intFromEnum(wasi.errno_t.MSGSIZE),
+    MULTIHOP = @intFromEnum(wasi.errno_t.MULTIHOP),
+    NAMETOOLONG = @intFromEnum(wasi.errno_t.NAMETOOLONG),
+    NETDOWN = @intFromEnum(wasi.errno_t.NETDOWN),
+    NETRESET = @intFromEnum(wasi.errno_t.NETRESET),
+    NETUNREACH = @intFromEnum(wasi.errno_t.NETUNREACH),
+    NFILE = @intFromEnum(wasi.errno_t.NFILE),
+    NOBUFS = @intFromEnum(wasi.errno_t.NOBUFS),
+    NODEV = @intFromEnum(wasi.errno_t.NODEV),
+    NOENT = @intFromEnum(wasi.errno_t.NOENT),
+    NOEXEC = @intFromEnum(wasi.errno_t.NOEXEC),
+    NOLCK = @intFromEnum(wasi.errno_t.NOLCK),
+    NOLINK = @intFromEnum(wasi.errno_t.NOLINK),
+    NOMEM = @intFromEnum(wasi.errno_t.NOMEM),
+    NOMSG = @intFromEnum(wasi.errno_t.NOMSG),
+    NOPROTOOPT = @intFromEnum(wasi.errno_t.NOPROTOOPT),
+    NOSPC = @intFromEnum(wasi.errno_t.NOSPC),
+    NOSYS = @intFromEnum(wasi.errno_t.NOSYS),
+    NOTCONN = @intFromEnum(wasi.errno_t.NOTCONN),
+    NOTDIR = @intFromEnum(wasi.errno_t.NOTDIR),
+    NOTEMPTY = @intFromEnum(wasi.errno_t.NOTEMPTY),
+    NOTRECOVERABLE = @intFromEnum(wasi.errno_t.NOTRECOVERABLE),
+    NOTSOCK = @intFromEnum(wasi.errno_t.NOTSOCK),
     /// This is also the code used for `NOTSUP`.
-    OPNOTSUPP = @intFromEnum(wasi.E.OPNOTSUPP),
-    NOTTY = @intFromEnum(wasi.E.NOTTY),
-    NXIO = @intFromEnum(wasi.E.NXIO),
-    OVERFLOW = @intFromEnum(wasi.E.OVERFLOW),
-    OWNERDEAD = @intFromEnum(wasi.E.OWNERDEAD),
-    PERM = @intFromEnum(wasi.E.PERM),
-    PIPE = @intFromEnum(wasi.E.PIPE),
-    PROTO = @intFromEnum(wasi.E.PROTO),
-    PROTONOSUPPORT = @intFromEnum(wasi.E.PROTONOSUPPORT),
-    PROTOTYPE = @intFromEnum(wasi.E.PROTOTYPE),
-    RANGE = @intFromEnum(wasi.E.RANGE),
-    ROFS = @intFromEnum(wasi.E.ROFS),
-    SPIPE = @intFromEnum(wasi.E.SPIPE),
-    SRCH = @intFromEnum(wasi.E.SRCH),
-    STALE = @intFromEnum(wasi.E.STALE),
-    TIMEDOUT = @intFromEnum(wasi.E.TIMEDOUT),
-    TXTBSY = @intFromEnum(wasi.E.TXTBSY),
-    XDEV = @intFromEnum(wasi.E.XDEV),
-    NOTCAPABLE = @intFromEnum(wasi.E.NOTCAPABLE),
+    OPNOTSUPP = @intFromEnum(wasi.errno_t.OPNOTSUPP),
+    NOTTY = @intFromEnum(wasi.errno_t.NOTTY),
+    NXIO = @intFromEnum(wasi.errno_t.NXIO),
+    OVERFLOW = @intFromEnum(wasi.errno_t.OVERFLOW),
+    OWNERDEAD = @intFromEnum(wasi.errno_t.OWNERDEAD),
+    PERM = @intFromEnum(wasi.errno_t.PERM),
+    PIPE = @intFromEnum(wasi.errno_t.PIPE),
+    PROTO = @intFromEnum(wasi.errno_t.PROTO),
+    PROTONOSUPPORT = @intFromEnum(wasi.errno_t.PROTONOSUPPORT),
+    PROTOTYPE = @intFromEnum(wasi.errno_t.PROTOTYPE),
+    RANGE = @intFromEnum(wasi.errno_t.RANGE),
+    ROFS = @intFromEnum(wasi.errno_t.ROFS),
+    SPIPE = @intFromEnum(wasi.errno_t.SPIPE),
+    SRCH = @intFromEnum(wasi.errno_t.SRCH),
+    STALE = @intFromEnum(wasi.errno_t.STALE),
+    TIMEDOUT = @intFromEnum(wasi.errno_t.TIMEDOUT),
+    TXTBSY = @intFromEnum(wasi.errno_t.TXTBSY),
+    XDEV = @intFromEnum(wasi.errno_t.XDEV),
+    NOTCAPABLE = @intFromEnum(wasi.errno_t.NOTCAPABLE),
 
     ENOSTR = 100,
     EBFONT = 101,
@@ -689,14 +689,14 @@ pub const SIG = struct {
     pub const SYS = 31;
     pub const UNUSED = SIG.SYS;
 
-    pub const ERR = @as(?Sigaction.handler_fn, @ptrFromInt(std.math.maxInt(usize)));
-    pub const DFL = @as(?Sigaction.handler_fn, @ptrFromInt(0));
-    pub const IGN = @as(?Sigaction.handler_fn, @ptrFromInt(1));
+    pub const ERR: ?Sigaction.handler_fn = @ptrFromInt(std.math.maxInt(usize));
+    pub const DFL: ?Sigaction.handler_fn = @ptrFromInt(0);
+    pub const IGN: ?Sigaction.handler_fn = @ptrFromInt(1);
 };
 
 pub const Sigaction = extern struct {
-    pub const handler_fn = *const fn (c_int) align(1) callconv(.C) void;
-    pub const sigaction_fn = *const fn (c_int, *const siginfo_t, ?*const anyopaque) callconv(.C) void;
+    pub const handler_fn = *align(1) const fn (i32) callconv(.C) void;
+    pub const sigaction_fn = *const fn (i32, *const siginfo_t, ?*anyopaque) callconv(.C) void;
 
     handler: extern union {
         handler: ?handler_fn,
@@ -738,7 +738,7 @@ const siginfo_fields_union = extern union {
         },
     },
     sigfault: extern struct {
-        addr: *anyopaque,
+        addr: *allowzero anyopaque,
         addr_lsb: i16,
         first: extern union {
             addr_bnd: extern struct {

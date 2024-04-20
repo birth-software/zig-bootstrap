@@ -7,16 +7,14 @@ const Step = std.Build.Step;
 
 // Cases
 const compare_output = @import("compare_output.zig");
-const standalone = @import("standalone.zig");
 const stack_traces = @import("stack_traces.zig");
 const assemble_and_link = @import("assemble_and_link.zig");
 const translate_c = @import("translate_c.zig");
 const run_translated_c = @import("run_translated_c.zig");
-const link = @import("link.zig");
 
 // Implementations
-pub const TranslateCContext = @import("src/translate_c.zig").TranslateCContext;
-pub const RunTranslatedCContext = @import("src/run_translated_c.zig").RunTranslatedCContext;
+pub const TranslateCContext = @import("src/TranslateC.zig");
+pub const RunTranslatedCContext = @import("src/RunTranslatedC.zig");
 pub const CompareOutputContext = @import("src/CompareOutput.zig");
 pub const StackTracesContext = @import("src/StackTrace.zig");
 
@@ -619,7 +617,7 @@ const c_abi_targets = [_]CAbiTarget{
 
 pub fn addCompareOutputTests(
     b: *std.Build,
-    test_filter: ?[]const u8,
+    test_filters: []const []const u8,
     optimize_modes: []const OptimizeMode,
 ) *Step {
     const cases = b.allocator.create(CompareOutputContext) catch @panic("OOM");
@@ -627,7 +625,7 @@ pub fn addCompareOutputTests(
         .b = b,
         .step = b.step("test-compare-output", "Run the compare output tests"),
         .test_index = 0,
-        .test_filter = test_filter,
+        .test_filters = test_filters,
         .optimize_modes = optimize_modes,
     };
 
@@ -638,12 +636,12 @@ pub fn addCompareOutputTests(
 
 pub fn addStackTraceTests(
     b: *std.Build,
-    test_filter: ?[]const u8,
+    test_filters: []const []const u8,
     optimize_modes: []const OptimizeMode,
 ) *Step {
     const check_exe = b.addExecutable(.{
         .name = "check-stack-trace",
-        .root_source_file = .{ .path = "test/src/check-stack-trace.zig" },
+        .root_source_file = b.path("test/src/check-stack-trace.zig"),
         .target = b.host,
         .optimize = .Debug,
     });
@@ -653,7 +651,7 @@ pub fn addStackTraceTests(
         .b = b,
         .step = b.step("test-stack-traces", "Run the stack trace tests"),
         .test_index = 0,
-        .test_filter = test_filter,
+        .test_filters = test_filters,
         .optimize_modes = optimize_modes,
         .check_exe = check_exe,
     };
@@ -663,79 +661,35 @@ pub fn addStackTraceTests(
     return cases.step;
 }
 
+fn compilerHasPackageManager(b: *std.Build) bool {
+    // We can only use dependencies if the compiler was built with support for package management.
+    // (zig2 doesn't support it, but we still need to construct a build graph to build stage3.)
+    return b.available_deps.len != 0;
+}
+
 pub fn addStandaloneTests(
     b: *std.Build,
     optimize_modes: []const OptimizeMode,
     enable_macos_sdk: bool,
     enable_ios_sdk: bool,
-    omit_stage2: bool,
     enable_symlinks_windows: bool,
 ) *Step {
     const step = b.step("test-standalone", "Run the standalone tests");
-    const omit_symlinks = builtin.os.tag == .windows and !enable_symlinks_windows;
-
-    for (standalone.simple_cases) |case| {
-        for (optimize_modes) |optimize| {
-            if (!case.all_modes and optimize != .Debug) continue;
-            if (case.os_filter) |os_tag| {
-                if (os_tag != builtin.os.tag) continue;
-            }
-
-            const resolved_target = b.resolveTargetQuery(case.target);
-
-            if (case.is_exe) {
-                const exe = b.addExecutable(.{
-                    .name = std.fs.path.stem(case.src_path),
-                    .root_source_file = .{ .path = case.src_path },
-                    .optimize = optimize,
-                    .target = resolved_target,
-                });
-                if (case.link_libc) exe.linkLibC();
-
-                _ = exe.getEmittedBin();
-
-                step.dependOn(&exe.step);
-            }
-
-            if (case.is_test) {
-                const exe = b.addTest(.{
-                    .name = std.fs.path.stem(case.src_path),
-                    .root_source_file = .{ .path = case.src_path },
-                    .optimize = optimize,
-                    .target = resolved_target,
-                });
-                if (case.link_libc) exe.linkLibC();
-
-                const run = b.addRunArtifact(exe);
-                step.dependOn(&run.step);
-            }
-        }
+    if (compilerHasPackageManager(b)) {
+        const test_cases_dep_name = "standalone_test_cases";
+        const test_cases_dep = b.dependency(test_cases_dep_name, .{
+            .enable_ios_sdk = enable_ios_sdk,
+            .enable_macos_sdk = enable_macos_sdk,
+            .enable_symlinks_windows = enable_symlinks_windows,
+            .simple_skip_debug = mem.indexOfScalar(OptimizeMode, optimize_modes, .Debug) == null,
+            .simple_skip_release_safe = mem.indexOfScalar(OptimizeMode, optimize_modes, .ReleaseSafe) == null,
+            .simple_skip_release_fast = mem.indexOfScalar(OptimizeMode, optimize_modes, .ReleaseFast) == null,
+            .simple_skip_release_small = mem.indexOfScalar(OptimizeMode, optimize_modes, .ReleaseSmall) == null,
+        });
+        const test_cases_dep_step = test_cases_dep.builder.default_step;
+        test_cases_dep_step.name = b.dupe(test_cases_dep_name);
+        step.dependOn(test_cases_dep.builder.default_step);
     }
-
-    inline for (standalone.build_cases) |case| {
-        const requires_stage2 = @hasDecl(case.import, "requires_stage2") and
-            case.import.requires_stage2;
-        const requires_symlinks = @hasDecl(case.import, "requires_symlinks") and
-            case.import.requires_symlinks;
-        const requires_macos_sdk = @hasDecl(case.import, "requires_macos_sdk") and
-            case.import.requires_macos_sdk;
-        const requires_ios_sdk = @hasDecl(case.import, "requires_ios_sdk") and
-            case.import.requires_ios_sdk;
-        const bad =
-            (requires_stage2 and omit_stage2) or
-            (requires_symlinks and omit_symlinks) or
-            (requires_macos_sdk and !enable_macos_sdk) or
-            (requires_ios_sdk and !enable_ios_sdk);
-        if (!bad) {
-            const dep = b.anonymousDependency(case.build_root, case.import, .{});
-            const dep_step = dep.builder.default_step;
-            assert(mem.startsWith(u8, dep.builder.dep_prefix, "test."));
-            const dep_prefix_adjusted = dep.builder.dep_prefix["test.".len..];
-            dep_step.name = b.fmt("{s}{s}", .{ dep_prefix_adjusted, dep_step.name });
-            step.dependOn(dep_step);
-        }
-    }
-
     return step;
 }
 
@@ -743,49 +697,20 @@ pub fn addLinkTests(
     b: *std.Build,
     enable_macos_sdk: bool,
     enable_ios_sdk: bool,
-    omit_stage2: bool,
     enable_symlinks_windows: bool,
 ) *Step {
     const step = b.step("test-link", "Run the linker tests");
-    const omit_symlinks = builtin.os.tag == .windows and !enable_symlinks_windows;
-
-    inline for (link.cases) |case| {
-        if (mem.eql(u8, @typeName(case.import), "test.link.link")) {
-            const dep = b.anonymousDependency(case.build_root, case.import, .{
-                .has_macos_sdk = enable_macos_sdk,
-                .has_ios_sdk = enable_ios_sdk,
-                .has_symlinks_windows = !omit_symlinks,
-            });
-            const dep_step = dep.builder.default_step;
-            assert(mem.startsWith(u8, dep.builder.dep_prefix, "test."));
-            const dep_prefix_adjusted = dep.builder.dep_prefix["test.".len..];
-            dep_step.name = b.fmt("{s}{s}", .{ dep_prefix_adjusted, dep_step.name });
-            step.dependOn(dep_step);
-        } else {
-            const requires_stage2 = @hasDecl(case.import, "requires_stage2") and
-                case.import.requires_stage2;
-            const requires_symlinks = @hasDecl(case.import, "requires_symlinks") and
-                case.import.requires_symlinks;
-            const requires_macos_sdk = @hasDecl(case.import, "requires_macos_sdk") and
-                case.import.requires_macos_sdk;
-            const requires_ios_sdk = @hasDecl(case.import, "requires_ios_sdk") and
-                case.import.requires_ios_sdk;
-            const bad =
-                (requires_stage2 and omit_stage2) or
-                (requires_symlinks and omit_symlinks) or
-                (requires_macos_sdk and !enable_macos_sdk) or
-                (requires_ios_sdk and !enable_ios_sdk);
-            if (!bad) {
-                const dep = b.anonymousDependency(case.build_root, case.import, .{});
-                const dep_step = dep.builder.default_step;
-                assert(mem.startsWith(u8, dep.builder.dep_prefix, "test."));
-                const dep_prefix_adjusted = dep.builder.dep_prefix["test.".len..];
-                dep_step.name = b.fmt("{s}{s}", .{ dep_prefix_adjusted, dep_step.name });
-                step.dependOn(dep_step);
-            }
-        }
+    if (compilerHasPackageManager(b)) {
+        const test_cases_dep_name = "link_test_cases";
+        const test_cases_dep = b.dependency(test_cases_dep_name, .{
+            .enable_ios_sdk = enable_ios_sdk,
+            .enable_macos_sdk = enable_macos_sdk,
+            .enable_symlinks_windows = enable_symlinks_windows,
+        });
+        const test_cases_dep_step = test_cases_dep.builder.default_step;
+        test_cases_dep_step.name = b.dupe(test_cases_dep_name);
+        step.dependOn(test_cases_dep.builder.default_step);
     }
-
     return step;
 }
 
@@ -954,7 +879,7 @@ pub fn addCliTests(b: *std.Build) *Step {
         run6.step.dependOn(&write6.step);
 
         // TODO change this to an exact match
-        const check6 = b.addCheckFile(.{ .path = fmt6_path }, .{
+        const check6 = b.addCheckFile(.{ .cwd_relative = fmt6_path }, .{
             .expected_matches = &.{
                 "// no reason",
             },
@@ -983,13 +908,13 @@ pub fn addCliTests(b: *std.Build) *Step {
     return step;
 }
 
-pub fn addAssembleAndLinkTests(b: *std.Build, test_filter: ?[]const u8, optimize_modes: []const OptimizeMode) *Step {
+pub fn addAssembleAndLinkTests(b: *std.Build, test_filters: []const []const u8, optimize_modes: []const OptimizeMode) *Step {
     const cases = b.allocator.create(CompareOutputContext) catch @panic("OOM");
     cases.* = CompareOutputContext{
         .b = b,
         .step = b.step("test-asm-link", "Run the assemble and link tests"),
         .test_index = 0,
-        .test_filter = test_filter,
+        .test_filters = test_filters,
         .optimize_modes = optimize_modes,
     };
 
@@ -998,48 +923,49 @@ pub fn addAssembleAndLinkTests(b: *std.Build, test_filter: ?[]const u8, optimize
     return cases.step;
 }
 
-pub fn addTranslateCTests(b: *std.Build, test_filter: ?[]const u8) *Step {
+pub fn addTranslateCTests(b: *std.Build, parent_step: *std.Build.Step, test_filters: []const []const u8) void {
     const cases = b.allocator.create(TranslateCContext) catch @panic("OOM");
     cases.* = TranslateCContext{
         .b = b,
-        .step = b.step("test-translate-c", "Run the C translation tests"),
+        .step = parent_step,
         .test_index = 0,
-        .test_filter = test_filter,
+        .test_filters = test_filters,
     };
 
     translate_c.addCases(cases);
 
-    return cases.step;
+    return;
 }
 
 pub fn addRunTranslatedCTests(
     b: *std.Build,
-    test_filter: ?[]const u8,
+    parent_step: *std.Build.Step,
+    test_filters: []const []const u8,
     target: std.Build.ResolvedTarget,
-) *Step {
+) void {
     const cases = b.allocator.create(RunTranslatedCContext) catch @panic("OOM");
     cases.* = .{
         .b = b,
-        .step = b.step("test-run-translated-c", "Run the Run-Translated-C tests"),
+        .step = parent_step,
         .test_index = 0,
-        .test_filter = test_filter,
+        .test_filters = test_filters,
         .target = target,
     };
 
     run_translated_c.addCases(cases);
 
-    return cases.step;
+    return;
 }
 
 const ModuleTestOptions = struct {
-    test_filter: ?[]const u8,
+    test_filters: []const []const u8,
     root_src: []const u8,
     name: []const u8,
     desc: []const u8,
     optimize_modes: []const OptimizeMode,
+    include_paths: []const []const u8,
     skip_single_threaded: bool,
     skip_non_native: bool,
-    skip_cross_glibc: bool,
     skip_libc: bool,
     max_rss: usize = 0,
 };
@@ -1057,10 +983,6 @@ pub fn addModuleTests(b: *std.Build, options: ModuleTestOptions) *Step {
 
         const resolved_target = b.resolveTargetQuery(test_target.target);
         const target = resolved_target.result;
-
-        if (options.skip_cross_glibc and !test_target.target.isNative() and
-            target.isGnuLibC() and test_target.link_libc == true)
-            continue;
 
         if (options.skip_libc and test_target.link_libc == true)
             continue;
@@ -1115,16 +1037,16 @@ pub fn addModuleTests(b: *std.Build, options: ModuleTestOptions) *Step {
             options.max_rss;
 
         const these_tests = b.addTest(.{
-            .root_source_file = .{ .path = options.root_src },
+            .root_source_file = b.path(options.root_src),
             .optimize = test_target.optimize_mode,
             .target = resolved_target,
             .max_rss = max_rss,
-            .filter = options.test_filter,
+            .filters = options.test_filters,
             .link_libc = test_target.link_libc,
             .single_threaded = test_target.single_threaded,
             .use_llvm = test_target.use_llvm,
             .use_lld = test_target.use_lld,
-            .zig_lib_dir = .{ .path = "lib" },
+            .zig_lib_dir = b.path("lib"),
             .pic = test_target.pic,
             .strip = test_target.strip,
         });
@@ -1140,12 +1062,7 @@ pub fn addModuleTests(b: *std.Build, options: ModuleTestOptions) *Step {
         const use_lld = if (test_target.use_lld == false) "-no-lld" else "";
         const use_pic = if (test_target.pic == true) "-pic" else "";
 
-        these_tests.addIncludePath(.{ .path = "test" });
-
-        if (target.os.tag == .wasi) {
-            // WASI's default stack size can be too small for some big tests.
-            these_tests.stack_size = 2 * 1024 * 1024;
-        }
+        for (options.include_paths) |include_path| these_tests.addIncludePath(b.path(include_path));
 
         const qualified_name = b.fmt("{s}-{s}-{s}-{s}{s}{s}{s}{s}{s}", .{
             options.name,
@@ -1167,29 +1084,44 @@ pub fn addModuleTests(b: *std.Build, options: ModuleTestOptions) *Step {
                 .name = qualified_name,
                 .link_libc = test_target.link_libc,
                 .target = b.resolveTargetQuery(altered_query),
-                .zig_lib_dir = .{ .path = "lib" },
+                .zig_lib_dir = b.path("lib"),
             });
             compile_c.addCSourceFile(.{
                 .file = these_tests.getEmittedBin(),
                 .flags = &.{
-                    // TODO output -std=c89 compatible C code
+                    // Tracking issue for making the C backend generate C89 compatible code:
+                    // https://github.com/ziglang/zig/issues/19468
                     "-std=c99",
-                    "-pedantic",
                     "-Werror",
-                    // TODO stop violating these pedantic errors. spotted everywhere
+
+                    "-Wall",
+                    "-Wembedded-directive",
+                    "-Wempty-translation-unit",
+                    "-Wextra",
+                    "-Wgnu",
+                    "-Winvalid-utf8",
+                    "-Wkeyword-macro",
+                    "-Woverlength-strings",
+
+                    // Tracking issue for making the C backend generate code
+                    // that does not trigger warnings:
+                    // https://github.com/ziglang/zig/issues/19467
+
+                    // spotted everywhere
                     "-Wno-builtin-requires-header",
-                    // TODO stop violating these pedantic errors. spotted on linux
-                    "-Wno-address-of-packed-member",
-                    "-Wno-gnu-folding-constant",
-                    "-Wno-incompatible-function-pointer-types",
+
+                    // spotted on linux
+                    "-Wno-braced-scalar-init",
+                    "-Wno-excess-initializers",
+                    "-Wno-incompatible-pointer-types-discards-qualifiers",
+                    "-Wno-unused",
+                    "-Wno-unused-parameter",
+
+                    // spotted on darwin
                     "-Wno-incompatible-pointer-types",
-                    "-Wno-overlength-strings",
-                    // TODO stop violating these pedantic errors. spotted on darwin
-                    "-Wno-dollar-in-identifier-extension",
-                    "-Wno-absolute-value",
                 },
             });
-            compile_c.addIncludePath(.{ .path = "lib" }); // for zig.h
+            compile_c.addIncludePath(b.path("lib")); // for zig.h
             if (target.os.tag == .windows) {
                 if (true) {
                     // Unfortunately this requires about 8G of RAM for clang to compile
@@ -1265,7 +1197,7 @@ pub fn addCAbiTests(b: *std.Build, skip_non_native: bool, skip_release: bool) *S
                     if (c_abi_target.use_lld == false) "-no-lld" else "",
                     if (c_abi_target.pic == true) "-pic" else "",
                 }),
-                .root_source_file = .{ .path = "test/c_abi/main.zig" },
+                .root_source_file = b.path("test/c_abi/main.zig"),
                 .target = resolved_target,
                 .optimize = optimize_mode,
                 .link_libc = true,
@@ -1275,7 +1207,7 @@ pub fn addCAbiTests(b: *std.Build, skip_non_native: bool, skip_release: bool) *S
                 .strip = c_abi_target.strip,
             });
             test_step.addCSourceFile(.{
-                .file = .{ .path = "test/c_abi/cfuncs.c" },
+                .file = b.path("test/c_abi/cfuncs.c"),
                 .flags = &.{"-std=c99"},
             });
             for (c_abi_target.c_defines) |define| test_step.defineCMacro(define, null);
@@ -1295,8 +1227,10 @@ pub fn addCAbiTests(b: *std.Build, skip_non_native: bool, skip_release: bool) *S
 pub fn addCases(
     b: *std.Build,
     parent_step: *Step,
-    opt_test_filter: ?[]const u8,
+    test_filters: []const []const u8,
     check_case_exe: *std.Build.Step.Compile,
+    target: std.Build.ResolvedTarget,
+    translate_c_options: @import("src/Cases.zig").TranslateCOptions,
     build_options: @import("cases.zig").BuildOptions,
 ) !void {
     const arena = b.allocator;
@@ -1310,11 +1244,13 @@ pub fn addCases(
     cases.addFromDir(dir, b);
     try @import("cases.zig").addCases(&cases, build_options, b);
 
+    cases.lowerToTranslateCSteps(b, parent_step, test_filters, target, translate_c_options);
+
     const cases_dir_path = try b.build_root.join(b.allocator, &.{ "test", "cases" });
     cases.lowerToBuildSteps(
         b,
         parent_step,
-        opt_test_filter,
+        test_filters,
         cases_dir_path,
         check_case_exe,
     );

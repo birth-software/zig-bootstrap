@@ -5,9 +5,9 @@ const assert = std.debug.assert;
 const Ast = std.zig.Ast;
 const InternPool = @import("InternPool.zig");
 
-const Zir = @import("Zir.zig");
+const Zir = std.zig.Zir;
 const Module = @import("Module.zig");
-const LazySrcLoc = Module.LazySrcLoc;
+const LazySrcLoc = std.zig.LazySrcLoc;
 
 /// Write human-readable, debug formatted ZIR code to a file.
 pub fn renderAsTextToFile(
@@ -282,7 +282,6 @@ const Writer = struct {
 
             .ref,
             .ret_implicit,
-            .closure_capture,
             .validate_ref_ty,
             => try self.writeUnTok(stream, inst),
 
@@ -356,7 +355,6 @@ const Writer = struct {
             .atomic_rmw => try self.writeAtomicRmw(stream, inst),
             .shuffle => try self.writeShuffle(stream, inst),
             .mul_add => try self.writeMulAdd(stream, inst),
-            .field_parent_ptr => try self.writeFieldParentPtr(stream, inst),
             .builtin_call => try self.writeBuiltinCall(stream, inst),
 
             .field_type_ref => try self.writeFieldTypeRef(stream, inst),
@@ -510,12 +508,6 @@ const Writer = struct {
 
             .dbg_stmt => try self.writeDbgStmt(stream, inst),
 
-            .dbg_block_begin,
-            .dbg_block_end,
-            => try stream.writeAll(")"),
-
-            .closure_get => try self.writeInstNode(stream, inst),
-
             .@"defer" => try self.writeDefer(stream, inst),
             .defer_err_code => try self.writeDeferErrCode(stream, inst),
 
@@ -615,6 +607,8 @@ const Writer = struct {
             .ptr_cast_no_dest => try self.writePtrCastNoDest(stream, extended),
 
             .restore_err_ret_index => try self.writeRestoreErrRetIndex(stream, extended),
+            .closure_get => try self.writeClosureGet(stream, extended),
+            .field_parent_ptr => try self.writeFieldParentPtr(stream, extended),
         }
     }
 
@@ -907,16 +901,21 @@ const Writer = struct {
         try self.writeSrc(stream, inst_data.src());
     }
 
-    fn writeFieldParentPtr(self: *Writer, stream: anytype, inst: Zir.Inst.Index) !void {
-        const inst_data = self.code.instructions.items(.data)[@intFromEnum(inst)].pl_node;
-        const extra = self.code.extraData(Zir.Inst.FieldParentPtr, inst_data.payload_index).data;
-        try self.writeInstRef(stream, extra.parent_type);
+    fn writeFieldParentPtr(self: *Writer, stream: anytype, extended: Zir.Inst.Extended.InstData) !void {
+        const extra = self.code.extraData(Zir.Inst.FieldParentPtr, extended.operand).data;
+        const FlagsInt = @typeInfo(Zir.Inst.FullPtrCastFlags).Struct.backing_integer.?;
+        const flags: Zir.Inst.FullPtrCastFlags = @bitCast(@as(FlagsInt, @truncate(extended.small)));
+        if (flags.align_cast) try stream.writeAll("align_cast, ");
+        if (flags.addrspace_cast) try stream.writeAll("addrspace_cast, ");
+        if (flags.const_cast) try stream.writeAll("const_cast, ");
+        if (flags.volatile_cast) try stream.writeAll("volatile_cast, ");
+        try self.writeInstRef(stream, extra.parent_ptr_type);
         try stream.writeAll(", ");
         try self.writeInstRef(stream, extra.field_name);
         try stream.writeAll(", ");
         try self.writeInstRef(stream, extra.field_ptr);
         try stream.writeAll(") ");
-        try self.writeSrc(stream, inst_data.src());
+        try self.writeSrc(stream, extra.src());
     }
 
     fn writeBuiltinAsyncCall(self: *Writer, stream: anytype, extended: Zir.Inst.Extended.InstData) !void {
@@ -1006,7 +1005,7 @@ const Writer = struct {
         const decl_name = self.code.nullTerminatedString(extra.decl_name);
 
         try self.writeInstRef(stream, extra.namespace);
-        try stream.print(", {}, ", .{std.zig.fmtId(decl_name)});
+        try stream.print(", {p}, ", .{std.zig.fmtId(decl_name)});
         try self.writeInstRef(stream, extra.options);
         try stream.writeAll(") ");
         try self.writeSrc(stream, inst_data.src());
@@ -1075,7 +1074,8 @@ const Writer = struct {
     }
 
     fn writePtrCastFull(self: *Writer, stream: anytype, extended: Zir.Inst.Extended.InstData) !void {
-        const flags = @as(Zir.Inst.FullPtrCastFlags, @bitCast(@as(u5, @truncate(extended.small))));
+        const FlagsInt = @typeInfo(Zir.Inst.FullPtrCastFlags).Struct.backing_integer.?;
+        const flags: Zir.Inst.FullPtrCastFlags = @bitCast(@as(FlagsInt, @truncate(extended.small)));
         const extra = self.code.extraData(Zir.Inst.BinNode, extended.operand).data;
         const src = LazySrcLoc.nodeOffset(extra.node);
         if (flags.ptr_cast) try stream.writeAll("ptr_cast, ");
@@ -1091,7 +1091,8 @@ const Writer = struct {
     }
 
     fn writePtrCastNoDest(self: *Writer, stream: anytype, extended: Zir.Inst.Extended.InstData) !void {
-        const flags = @as(Zir.Inst.FullPtrCastFlags, @bitCast(@as(u5, @truncate(extended.small))));
+        const FlagsInt = @typeInfo(Zir.Inst.FullPtrCastFlags).Struct.backing_integer.?;
+        const flags: Zir.Inst.FullPtrCastFlags = @bitCast(@as(FlagsInt, @truncate(extended.small)));
         const extra = self.code.extraData(Zir.Inst.UnNode, extended.operand).data;
         const src = LazySrcLoc.nodeOffset(extra.node);
         if (flags.const_cast) try stream.writeAll("const_cast, ");
@@ -1242,7 +1243,7 @@ const Writer = struct {
 
                 const name = self.code.nullTerminatedString(output.data.name);
                 const constraint = self.code.nullTerminatedString(output.data.constraint);
-                try stream.print("output({}, \"{}\", ", .{
+                try stream.print("output({p}, \"{}\", ", .{
                     std.zig.fmtId(name), std.zig.fmtEscapes(constraint),
                 });
                 try self.writeFlag(stream, "->", is_type);
@@ -1261,7 +1262,7 @@ const Writer = struct {
 
                 const name = self.code.nullTerminatedString(input.data.name);
                 const constraint = self.code.nullTerminatedString(input.data.constraint);
-                try stream.print("input({}, \"{}\", ", .{
+                try stream.print("input({p}, \"{}\", ", .{
                     std.zig.fmtId(name), std.zig.fmtEscapes(constraint),
                 });
                 try self.writeInstRef(stream, input.data.operand);
@@ -1277,7 +1278,7 @@ const Writer = struct {
                 const str_index = self.code.extra[extra_i];
                 extra_i += 1;
                 const clobber = self.code.nullTerminatedString(@enumFromInt(str_index));
-                try stream.print("{}", .{std.zig.fmtId(clobber)});
+                try stream.print("{p}", .{std.zig.fmtId(clobber)});
                 if (i + 1 < clobbers_len) {
                     try stream.writeAll(", ");
                 }
@@ -1405,6 +1406,12 @@ const Writer = struct {
 
         var extra_index: usize = extra.end;
 
+        const captures_len = if (small.has_captures_len) blk: {
+            const captures_len = self.code.extra[extra_index];
+            extra_index += 1;
+            break :blk captures_len;
+        } else 0;
+
         const fields_len = if (small.has_fields_len) blk: {
             const fields_len = self.code.extra[extra_index];
             extra_index += 1;
@@ -1423,12 +1430,26 @@ const Writer = struct {
 
         try stream.print("{s}, ", .{@tagName(small.name_strategy)});
 
-        if (small.layout == .Packed and small.has_backing_int) {
+        if (captures_len == 0) {
+            try stream.writeAll("{}, ");
+        } else {
+            try stream.writeAll("{ ");
+            try self.writeCapture(stream, @bitCast(self.code.extra[extra_index]));
+            extra_index += 1;
+            for (1..captures_len) |_| {
+                try stream.writeAll(", ");
+                try self.writeCapture(stream, @bitCast(self.code.extra[extra_index]));
+                extra_index += 1;
+            }
+            try stream.writeAll(" }, ");
+        }
+
+        if (small.has_backing_int) {
             const backing_int_body_len = self.code.extra[extra_index];
             extra_index += 1;
-            try stream.writeAll("Packed(");
+            try stream.writeAll("packed(");
             if (backing_int_body_len == 0) {
-                const backing_int_ref = @as(Zir.Inst.Ref, @enumFromInt(self.code.extra[extra_index]));
+                const backing_int_ref: Zir.Inst.Ref = @enumFromInt(self.code.extra[extra_index]);
                 extra_index += 1;
                 try self.writeInstRef(stream, backing_int_ref);
             } else {
@@ -1538,7 +1559,7 @@ const Writer = struct {
                 try self.writeFlag(stream, "comptime ", field.is_comptime);
                 if (field.name != .empty) {
                     const field_name = self.code.nullTerminatedString(field.name);
-                    try stream.print("{}: ", .{std.zig.fmtId(field_name)});
+                    try stream.print("{p}: ", .{std.zig.fmtId(field_name)});
                 } else {
                     try stream.print("@\"{d}\": ", .{i});
                 }
@@ -1605,6 +1626,12 @@ const Writer = struct {
             break :blk tag_type_ref;
         } else .none;
 
+        const captures_len = if (small.has_captures_len) blk: {
+            const captures_len = self.code.extra[extra_index];
+            extra_index += 1;
+            break :blk captures_len;
+        } else 0;
+
         const body_len = if (small.has_body_len) blk: {
             const body_len = self.code.extra[extra_index];
             extra_index += 1;
@@ -1627,6 +1654,20 @@ const Writer = struct {
             @tagName(small.name_strategy), @tagName(small.layout),
         });
         try self.writeFlag(stream, "autoenum, ", small.auto_enum_tag);
+
+        if (captures_len == 0) {
+            try stream.writeAll("{}, ");
+        } else {
+            try stream.writeAll("{ ");
+            try self.writeCapture(stream, @bitCast(self.code.extra[extra_index]));
+            extra_index += 1;
+            for (1..captures_len) |_| {
+                try stream.writeAll(", ");
+                try self.writeCapture(stream, @bitCast(self.code.extra[extra_index]));
+                extra_index += 1;
+            }
+            try stream.writeAll(" }, ");
+        }
 
         if (decls_len == 0) {
             try stream.writeAll("{}");
@@ -1697,7 +1738,7 @@ const Writer = struct {
 
             try self.writeDocComment(stream, doc_comment_index);
             try stream.writeByteNTimes(' ', self.indent);
-            try stream.print("{}", .{std.zig.fmtId(field_name)});
+            try stream.print("{p}", .{std.zig.fmtId(field_name)});
 
             if (has_type) {
                 const field_type = @as(Zir.Inst.Ref, @enumFromInt(self.code.extra[extra_index]));
@@ -1752,6 +1793,12 @@ const Writer = struct {
             break :blk tag_type_ref;
         } else .none;
 
+        const captures_len = if (small.has_captures_len) blk: {
+            const captures_len = self.code.extra[extra_index];
+            extra_index += 1;
+            break :blk captures_len;
+        } else 0;
+
         const body_len = if (small.has_body_len) blk: {
             const body_len = self.code.extra[extra_index];
             extra_index += 1;
@@ -1772,6 +1819,20 @@ const Writer = struct {
 
         try stream.print("{s}, ", .{@tagName(small.name_strategy)});
         try self.writeFlag(stream, "nonexhaustive, ", small.nonexhaustive);
+
+        if (captures_len == 0) {
+            try stream.writeAll("{}, ");
+        } else {
+            try stream.writeAll("{ ");
+            try self.writeCapture(stream, @bitCast(self.code.extra[extra_index]));
+            extra_index += 1;
+            for (1..captures_len) |_| {
+                try stream.writeAll(", ");
+                try self.writeCapture(stream, @bitCast(self.code.extra[extra_index]));
+                extra_index += 1;
+            }
+            try stream.writeAll(" }, ");
+        }
 
         if (decls_len == 0) {
             try stream.writeAll("{}, ");
@@ -1830,7 +1891,7 @@ const Writer = struct {
                 try self.writeDocComment(stream, doc_comment_index);
 
                 try stream.writeByteNTimes(' ', self.indent);
-                try stream.print("{}", .{std.zig.fmtId(field_name)});
+                try stream.print("{p}", .{std.zig.fmtId(field_name)});
 
                 if (has_tag_value) {
                     const tag_value_ref = @as(Zir.Inst.Ref, @enumFromInt(self.code.extra[extra_index]));
@@ -1858,6 +1919,12 @@ const Writer = struct {
         const extra = self.code.extraData(Zir.Inst.OpaqueDecl, extended.operand);
         var extra_index: usize = extra.end;
 
+        const captures_len = if (small.has_captures_len) blk: {
+            const captures_len = self.code.extra[extra_index];
+            extra_index += 1;
+            break :blk captures_len;
+        } else 0;
+
         const decls_len = if (small.has_decls_len) blk: {
             const decls_len = self.code.extra[extra_index];
             extra_index += 1;
@@ -1865,6 +1932,20 @@ const Writer = struct {
         } else 0;
 
         try stream.print("{s}, ", .{@tagName(small.name_strategy)});
+
+        if (captures_len == 0) {
+            try stream.writeAll("{}, ");
+        } else {
+            try stream.writeAll("{ ");
+            try self.writeCapture(stream, @bitCast(self.code.extra[extra_index]));
+            extra_index += 1;
+            for (1..captures_len) |_| {
+                try stream.writeAll(", ");
+                try self.writeCapture(stream, @bitCast(self.code.extra[extra_index]));
+                extra_index += 1;
+            }
+            try stream.writeAll(" }, ");
+        }
 
         if (decls_len == 0) {
             try stream.writeAll("{})");
@@ -1905,7 +1986,7 @@ const Writer = struct {
             const doc_comment_index: Zir.NullTerminatedString = @enumFromInt(self.code.extra[extra_index + 1]);
             try self.writeDocComment(stream, doc_comment_index);
             try stream.writeByteNTimes(' ', self.indent);
-            try stream.print("{},\n", .{std.zig.fmtId(name)});
+            try stream.print("{p},\n", .{std.zig.fmtId(name)});
         }
 
         self.indent -= 2;
@@ -2710,6 +2791,12 @@ const Writer = struct {
         try self.writeSrc(stream, inst_data.src());
     }
 
+    fn writeClosureGet(self: *Writer, stream: anytype, extended: Zir.Inst.Extended.InstData) !void {
+        const src = LazySrcLoc.nodeOffset(@bitCast(extended.operand));
+        try stream.print("{d})) ", .{extended.small});
+        try self.writeSrc(stream, src);
+    }
+
     fn writeInstRef(self: *Writer, stream: anytype, ref: Zir.Inst.Ref) !void {
         if (ref == .none) {
             return stream.writeAll(".none");
@@ -2724,6 +2811,23 @@ const Writer = struct {
     fn writeInstIndex(self: *Writer, stream: anytype, inst: Zir.Inst.Index) !void {
         _ = self;
         return stream.print("%{d}", .{@intFromEnum(inst)});
+    }
+
+    fn writeCapture(self: *Writer, stream: anytype, capture: Zir.Inst.Capture) !void {
+        switch (capture.unwrap()) {
+            .nested => |i| return stream.print("[{d}]", .{i}),
+            .instruction => |inst| return self.writeInstIndex(stream, inst),
+            .instruction_load => |ptr_inst| {
+                try stream.writeAll("load ");
+                try self.writeInstIndex(stream, ptr_inst);
+            },
+            .decl_val => |str| try stream.print("decl_val \"{}\"", .{
+                std.zig.fmtEscapes(self.code.nullTerminatedString(str)),
+            }),
+            .decl_ref => |str| try stream.print("decl_ref \"{}\"", .{
+                std.zig.fmtEscapes(self.code.nullTerminatedString(str)),
+            }),
+        }
     }
 
     fn writeOptionalInstRef(

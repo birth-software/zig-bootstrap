@@ -258,7 +258,7 @@ pub fn createEmpty(
             const index: File.Index = @intCast(try self.files.addOne(gpa));
             self.files.set(index, .{ .zig_object = .{
                 .index = index,
-                .path = try std.fmt.allocPrint(arena, "{s}.o", .{std.fs.path.stem(
+                .path = try std.fmt.allocPrint(arena, "{s}.o", .{fs.path.stem(
                     zcu.main_mod.root_src_path,
                 )}),
             } });
@@ -843,7 +843,7 @@ fn dumpArgv(self: *MachO, comp: *Compilation) !void {
         }
 
         for (self.frameworks) |framework| {
-            const name = std.fs.path.stem(framework.path);
+            const name = fs.path.stem(framework.path);
             const arg = if (framework.needed)
                 try std.fmt.allocPrint(arena, "-needed_framework {s}", .{name})
             else if (framework.weak)
@@ -917,7 +917,7 @@ pub const ParseError = error{
     NotSupported,
     Unhandled,
     UnknownFileType,
-} || std.os.SeekError || std.fs.File.OpenError || std.fs.File.ReadError || tapi.TapiError;
+} || fs.File.SeekError || fs.File.OpenError || fs.File.ReadError || tapi.TapiError;
 
 pub fn parsePositional(self: *MachO, path: []const u8, must_link: bool) ParseError!void {
     const tracy = trace(@src());
@@ -956,7 +956,7 @@ fn parseObject(self: *MachO, path: []const u8) ParseError!void {
     defer tracy.end();
 
     const gpa = self.base.comp.gpa;
-    const file = try std.fs.cwd().openFile(path, .{});
+    const file = try fs.cwd().openFile(path, .{});
     const handle = try self.addFileHandle(file);
     const mtime: u64 = mtime: {
         const stat = file.stat() catch break :mtime 0;
@@ -992,7 +992,7 @@ fn parseArchive(self: *MachO, lib: SystemLib, must_link: bool, fat_arch: ?fat.Ar
 
     const gpa = self.base.comp.gpa;
 
-    const file = try std.fs.cwd().openFile(lib.path, .{});
+    const file = try fs.cwd().openFile(lib.path, .{});
     const handle = try self.addFileHandle(file);
 
     var archive = Archive{};
@@ -1029,7 +1029,7 @@ fn parseDylib(self: *MachO, lib: SystemLib, explicit: bool, fat_arch: ?fat.Arch)
 
     const gpa = self.base.comp.gpa;
 
-    const file = try std.fs.cwd().openFile(lib.path, .{});
+    const file = try fs.cwd().openFile(lib.path, .{});
     defer file.close();
 
     const index = @as(File.Index, @intCast(try self.files.addOne(gpa)));
@@ -1054,7 +1054,7 @@ fn parseTbd(self: *MachO, lib: SystemLib, explicit: bool) ParseError!File.Index 
     defer tracy.end();
 
     const gpa = self.base.comp.gpa;
-    const file = try std.fs.cwd().openFile(lib.path, .{});
+    const file = try fs.cwd().openFile(lib.path, .{});
     defer file.close();
 
     var lib_stub = LibStub.loadFromFile(gpa, file) catch return error.MalformedTbd; // TODO actually handle different errors
@@ -1080,10 +1080,10 @@ fn parseTbd(self: *MachO, lib: SystemLib, explicit: bool) ParseError!File.Index 
 /// image unless overriden by -no_implicit_dylibs.
 fn isHoisted(self: *MachO, install_name: []const u8) bool {
     if (self.no_implicit_dylibs) return true;
-    if (std.fs.path.dirname(install_name)) |dirname| {
+    if (fs.path.dirname(install_name)) |dirname| {
         if (mem.startsWith(u8, dirname, "/usr/lib")) return true;
         if (eatPrefix(dirname, "/System/Library/Frameworks/")) |path| {
-            const basename = std.fs.path.basename(install_name);
+            const basename = fs.path.basename(install_name);
             if (mem.indexOfScalar(u8, path, '.')) |index| {
                 if (mem.eql(u8, basename, path[0..index])) return true;
             }
@@ -1105,7 +1105,7 @@ fn accessLibPath(
         test_path.clearRetainingCapacity();
         try test_path.writer().print("{s}" ++ sep ++ "lib{s}{s}", .{ search_dir, name, ext });
         try checked_paths.append(try arena.dupe(u8, test_path.items));
-        std.fs.cwd().access(test_path.items, .{}) catch |err| switch (err) {
+        fs.cwd().access(test_path.items, .{}) catch |err| switch (err) {
             error.FileNotFound => continue,
             else => |e| return e,
         };
@@ -1133,7 +1133,7 @@ fn accessFrameworkPath(
             ext,
         });
         try checked_paths.append(try arena.dupe(u8, test_path.items));
-        std.fs.cwd().access(test_path.items, .{}) catch |err| switch (err) {
+        fs.cwd().access(test_path.items, .{}) catch |err| switch (err) {
             error.FileNotFound => continue,
             else => |e| return e,
         };
@@ -1181,7 +1181,7 @@ fn parseDependentDylibs(self: *MachO) !void {
 
             const full_path = full_path: {
                 {
-                    const stem = std.fs.path.stem(id.name);
+                    const stem = fs.path.stem(id.name);
 
                     // Framework
                     for (framework_dirs) |dir| {
@@ -1197,18 +1197,18 @@ fn parseDependentDylibs(self: *MachO) !void {
                     }
                 }
 
-                if (std.fs.path.isAbsolute(id.name)) {
-                    const existing_ext = std.fs.path.extension(id.name);
+                if (fs.path.isAbsolute(id.name)) {
+                    const existing_ext = fs.path.extension(id.name);
                     const path = if (existing_ext.len > 0) id.name[0 .. id.name.len - existing_ext.len] else id.name;
                     for (&[_][]const u8{ ".tbd", ".dylib", "" }) |ext| {
                         test_path.clearRetainingCapacity();
                         if (self.base.comp.sysroot) |root| {
-                            try test_path.writer().print("{s}" ++ std.fs.path.sep_str ++ "{s}{s}", .{ root, path, ext });
+                            try test_path.writer().print("{s}" ++ fs.path.sep_str ++ "{s}{s}", .{ root, path, ext });
                         } else {
                             try test_path.writer().print("{s}{s}", .{ path, ext });
                         }
                         try checked_paths.append(try arena.dupe(u8, test_path.items));
-                        std.fs.cwd().access(test_path.items, .{}) catch |err| switch (err) {
+                        fs.cwd().access(test_path.items, .{}) catch |err| switch (err) {
                             error.FileNotFound => continue,
                             else => |e| return e,
                         };
@@ -1220,10 +1220,10 @@ fn parseDependentDylibs(self: *MachO) !void {
                     const dylib = self.getFile(dylib_index).?.dylib;
                     for (self.getFile(dylib.umbrella).?.dylib.rpaths.keys()) |rpath| {
                         const prefix = eatPrefix(rpath, "@loader_path/") orelse rpath;
-                        const rel_path = try std.fs.path.join(arena, &.{ prefix, path });
+                        const rel_path = try fs.path.join(arena, &.{ prefix, path });
                         try checked_paths.append(rel_path);
-                        var buffer: [std.fs.MAX_PATH_BYTES]u8 = undefined;
-                        const full_path = std.fs.realpath(rel_path, &buffer) catch continue;
+                        var buffer: [fs.MAX_PATH_BYTES]u8 = undefined;
+                        const full_path = fs.realpath(rel_path, &buffer) catch continue;
                         break :full_path try arena.dupe(u8, full_path);
                     }
                 } else if (eatPrefix(id.name, "@loader_path/")) |_| {
@@ -1235,8 +1235,8 @@ fn parseDependentDylibs(self: *MachO) !void {
                 }
 
                 try checked_paths.append(try arena.dupe(u8, id.name));
-                var buffer: [std.fs.MAX_PATH_BYTES]u8 = undefined;
-                if (std.fs.realpath(id.name, &buffer)) |full_path| {
+                var buffer: [fs.MAX_PATH_BYTES]u8 = undefined;
+                if (fs.realpath(id.name, &buffer)) |full_path| {
                     break :full_path try arena.dupe(u8, full_path);
                 } else |_| {
                     try self.reportMissingDependencyError(
@@ -1290,7 +1290,7 @@ fn parseDependentDylibs(self: *MachO) !void {
                     }
                     try umbrella.rpaths.ensureUnusedCapacity(gpa, dep_dylib.rpaths.keys().len);
                     for (dep_dylib.rpaths.keys()) |rpath| {
-                        umbrella.rpaths.putAssumeCapacity(rpath, {});
+                        umbrella.rpaths.putAssumeCapacity(try gpa.dupe(u8, rpath), {});
                     }
                 }
             } else {
@@ -2060,7 +2060,7 @@ fn calcSectionSizes(self: *MachO) !void {
 
         for (atoms.items) |atom_index| {
             const atom = self.getAtom(atom_index).?;
-            const atom_alignment = atom.alignment.toByteUnits(1);
+            const atom_alignment = atom.alignment.toByteUnits() orelse 1;
             const offset = mem.alignForward(u64, header.size, atom_alignment);
             const padding = offset - header.size;
             atom.value = offset;
@@ -2170,8 +2170,7 @@ fn initSegments(self: *MachO) !void {
     for (slice.items(.header)) |header| {
         const segname = header.segName();
         if (self.getSegmentByName(segname) == null) {
-            const flags: u32 = if (mem.startsWith(u8, segname, "__DATA_CONST")) macho.SG_READ_ONLY else 0;
-            _ = try self.addSegment(segname, .{ .prot = getSegmentProt(segname), .flags = flags });
+            _ = try self.addSegment(segname, .{ .prot = getSegmentProt(segname) });
         }
     }
 
@@ -2247,10 +2246,16 @@ fn initSegments(self: *MachO) !void {
         segment.nsects += 1;
         seg_id.* = segment_id;
     }
+
+    // Set __DATA_CONST as READ_ONLY
+    if (self.getSegmentByName("__DATA_CONST")) |seg_id| {
+        const seg = &self.segments.items[seg_id];
+        seg.flags |= macho.SG_READ_ONLY;
+    }
 }
 
 fn allocateSections(self: *MachO) !void {
-    const headerpad = load_commands.calcMinHeaderPadSize(self);
+    const headerpad = try load_commands.calcMinHeaderPadSize(self);
     var vmaddr: u64 = if (self.pagezero_seg_index) |index|
         self.segments.items[index].vmaddr + self.segments.items[index].vmsize
     else
@@ -2473,6 +2478,9 @@ fn initDyldInfoSections(self: *MachO) !void {
         nrebases += ctx.rebase_relocs;
         nbinds += ctx.bind_relocs;
         nweak_binds += ctx.weak_bind_relocs;
+    }
+    if (self.getInternalObject()) |int| {
+        nrebases += int.num_rebase_relocs;
     }
     try self.rebase.entries.ensureUnusedCapacity(gpa, nrebases);
     try self.bind.entries.ensureUnusedCapacity(gpa, nbinds);
@@ -2904,13 +2912,12 @@ pub fn writeStrtab(self: *MachO, off: u32) !u32 {
 
 fn writeLoadCommands(self: *MachO) !struct { usize, usize, u64 } {
     const gpa = self.base.comp.gpa;
-    const needed_size = load_commands.calcLoadCommandsSize(self, false);
+    const needed_size = try load_commands.calcLoadCommandsSize(self, false);
     const buffer = try gpa.alloc(u8, needed_size);
     defer gpa.free(buffer);
 
     var stream = std.io.fixedBufferStream(buffer);
-    var cwriter = std.io.countingWriter(stream.writer());
-    const writer = cwriter.writer();
+    const writer = stream.writer();
 
     var ncmds: usize = 0;
 
@@ -2974,7 +2981,7 @@ fn writeLoadCommands(self: *MachO) !struct { usize, usize, u64 } {
         ncmds += 1;
     }
 
-    const uuid_cmd_offset = @sizeOf(macho.mach_header_64) + cwriter.bytes_written;
+    const uuid_cmd_offset = @sizeOf(macho.mach_header_64) + stream.pos;
     try writer.writeStruct(self.uuid_cmd);
     ncmds += 1;
 
@@ -3002,7 +3009,7 @@ fn writeLoadCommands(self: *MachO) !struct { usize, usize, u64 } {
         ncmds += 1;
     }
 
-    assert(cwriter.bytes_written == needed_size);
+    assert(stream.pos == needed_size);
 
     try self.base.file.?.pwriteAll(buffer, @sizeOf(macho.mach_header_64));
 
@@ -3120,8 +3127,8 @@ pub fn updateFunc(self: *MachO, mod: *Module, func_index: InternPool.Index, air:
     return self.getZigObject().?.updateFunc(self, mod, func_index, air, liveness);
 }
 
-pub fn lowerUnnamedConst(self: *MachO, typed_value: TypedValue, decl_index: InternPool.DeclIndex) !u32 {
-    return self.getZigObject().?.lowerUnnamedConst(self, typed_value, decl_index);
+pub fn lowerUnnamedConst(self: *MachO, val: Value, decl_index: InternPool.DeclIndex) !u32 {
+    return self.getZigObject().?.lowerUnnamedConst(self, val, decl_index);
 }
 
 pub fn updateDecl(self: *MachO, mod: *Module, decl_index: InternPool.DeclIndex) !void {
@@ -3644,7 +3651,7 @@ pub fn getTarget(self: MachO) std.Target {
 /// into a new inode, remove the original file, and rename the copy to match
 /// the original file. This is super messy, but there doesn't seem any other
 /// way to please the XNU.
-pub fn invalidateKernelCache(dir: std.fs.Dir, sub_path: []const u8) !void {
+pub fn invalidateKernelCache(dir: fs.Dir, sub_path: []const u8) !void {
     if (comptime builtin.target.isDarwin() and builtin.target.cpu.arch == .aarch64) {
         try dir.copyFile(sub_path, dir, sub_path, .{});
     }
@@ -3728,7 +3735,6 @@ pub fn addSegment(self: *MachO, name: []const u8, opts: struct {
     fileoff: u64 = 0,
     filesize: u64 = 0,
     prot: macho.vm_prot_t = macho.PROT.NONE,
-    flags: u32 = 0,
 }) error{OutOfMemory}!u8 {
     const gpa = self.base.comp.gpa;
     const index = @as(u8, @intCast(self.segments.items.len));
@@ -3833,7 +3839,7 @@ pub fn getInternalObject(self: *MachO) ?*InternalObject {
     return self.getFile(index).?.internal;
 }
 
-pub fn addFileHandle(self: *MachO, file: std.fs.File) !File.HandleIndex {
+pub fn addFileHandle(self: *MachO, file: fs.File) !File.HandleIndex {
     const gpa = self.base.comp.gpa;
     const index: File.HandleIndex = @intCast(self.file_handles.items.len);
     const fh = try self.file_handles.addOne(gpa);
@@ -4130,10 +4136,10 @@ pub fn getDebugSymbols(self: *MachO) ?*DebugSymbols {
     return null;
 }
 
-pub fn ptraceAttach(self: *MachO, pid: std.os.pid_t) !void {
+pub fn ptraceAttach(self: *MachO, pid: std.posix.pid_t) !void {
     if (!is_hot_update_compatible) return;
 
-    const mach_task = try std.os.darwin.machTaskForPid(pid);
+    const mach_task = try std.c.machTaskForPid(pid);
     log.debug("Mach task for pid {d}: {any}", .{ pid, mach_task });
     self.hot_state.mach_task = mach_task;
 
@@ -4143,7 +4149,7 @@ pub fn ptraceAttach(self: *MachO, pid: std.os.pid_t) !void {
     // try std.os.ptrace(std.os.darwin.PT.ATTACHEXC, pid, 0, 0);
 }
 
-pub fn ptraceDetach(self: *MachO, pid: std.os.pid_t) !void {
+pub fn ptraceDetach(self: *MachO, pid: std.posix.pid_t) !void {
     if (!is_hot_update_compatible) return;
 
     _ = pid;
@@ -4314,8 +4320,6 @@ const is_hot_update_compatible = switch (builtin.target.os.tag) {
 const default_entry_symbol_name = "_main";
 
 pub const base_tag: link.File.Tag = link.File.Tag.macho;
-pub const N_DEAD: u16 = @as(u16, @bitCast(@as(i16, -1)));
-pub const N_BOUNDARY: u16 = @as(u16, @bitCast(@as(i16, -2)));
 
 const Section = struct {
     header: macho.section_64,
@@ -4326,7 +4330,7 @@ const Section = struct {
 };
 
 const HotUpdateState = struct {
-    mach_task: ?std.os.darwin.MachTask = null,
+    mach_task: ?std.c.MachTask = null,
 };
 
 pub const DynamicRelocs = struct {
@@ -4372,9 +4376,11 @@ pub const Platform = struct {
                         .IOS, .IOSSIMULATOR => .ios,
                         .TVOS, .TVOSSIMULATOR => .tvos,
                         .WATCHOS, .WATCHOSSIMULATOR => .watchos,
+                        .MACCATALYST => .ios,
                         else => @panic("TODO"),
                     },
                     .abi = switch (cmd.platform) {
+                        .MACCATALYST => .macabi,
                         .IOSSIMULATOR,
                         .TVOSSIMULATOR,
                         .WATCHOSSIMULATOR,
@@ -4421,7 +4427,11 @@ pub const Platform = struct {
     pub fn toApplePlatform(plat: Platform) macho.PLATFORM {
         return switch (plat.os_tag) {
             .macos => .MACOS,
-            .ios => if (plat.abi == .simulator) .IOSSIMULATOR else .IOS,
+            .ios => switch (plat.abi) {
+                .simulator => .IOSSIMULATOR,
+                .macabi => .MACCATALYST,
+                else => .IOS,
+            },
             .tvos => if (plat.abi == .simulator) .TVOSSIMULATOR else .TVOS,
             .watchos => if (plat.abi == .simulator) .WATCHOSSIMULATOR else .WATCHOS,
             else => unreachable,
@@ -4526,7 +4536,7 @@ fn inferSdkVersion(comp: *Compilation, sdk_layout: SdkLayout) ?std.SemanticVersi
 
     const sdk_dir = switch (sdk_layout) {
         .sdk => comp.sysroot.?,
-        .vendored => std.fs.path.join(arena, &.{ comp.zig_lib_directory.path.?, "libc", "darwin" }) catch return null,
+        .vendored => fs.path.join(arena, &.{ comp.zig_lib_directory.path.?, "libc", "darwin" }) catch return null,
     };
     if (readSdkVersionFromSettings(arena, sdk_dir)) |ver| {
         return parseSdkVersion(ver);
@@ -4537,7 +4547,7 @@ fn inferSdkVersion(comp: *Compilation, sdk_layout: SdkLayout) ?std.SemanticVersi
     }
 
     // infer from pathname
-    const stem = std.fs.path.stem(sdk_dir);
+    const stem = fs.path.stem(sdk_dir);
     const start = for (stem, 0..) |c, i| {
         if (std.ascii.isDigit(c)) break i;
     } else stem.len;
@@ -4552,8 +4562,8 @@ fn inferSdkVersion(comp: *Compilation, sdk_layout: SdkLayout) ?std.SemanticVersi
 // Use property `MinimalDisplayName` to determine version.
 // The file/property is also available with vendored libc.
 fn readSdkVersionFromSettings(arena: Allocator, dir: []const u8) ![]const u8 {
-    const sdk_path = try std.fs.path.join(arena, &.{ dir, "SDKSettings.json" });
-    const contents = try std.fs.cwd().readFileAlloc(arena, sdk_path, std.math.maxInt(u16));
+    const sdk_path = try fs.path.join(arena, &.{ dir, "SDKSettings.json" });
+    const contents = try fs.cwd().readFileAlloc(arena, sdk_path, std.math.maxInt(u16));
     const parsed = try std.json.parseFromSlice(std.json.Value, arena, contents, .{});
     if (parsed.value.object.get("MinimalDisplayName")) |ver| return ver.string;
     return error.SdkVersionFailure;
@@ -4610,13 +4620,7 @@ const SystemLib = struct {
     must_link: bool = false,
 };
 
-/// The filesystem layout of darwin SDK elements.
-pub const SdkLayout = enum {
-    /// macOS SDK layout: TOP { /usr/include, /usr/lib, /System/Library/Frameworks }.
-    sdk,
-    /// Shipped libc layout: TOP { /lib/libc/include,  /lib/libc/darwin, <NONE> }.
-    vendored,
-};
+pub const SdkLayout = std.zig.LibCDirs.DarwinSdkLayout;
 
 const UndefinedTreatment = enum {
     @"error",
@@ -4691,7 +4695,7 @@ const StubsHelperSection = synthetic.StubsHelperSection;
 const Symbol = @import("MachO/Symbol.zig");
 const Thunk = thunks.Thunk;
 const TlvPtrSection = synthetic.TlvPtrSection;
-const TypedValue = @import("../TypedValue.zig");
+const Value = @import("../Value.zig");
 const UnwindInfo = @import("MachO/UnwindInfo.zig");
 const WeakBindSection = synthetic.WeakBindSection;
 const ZigGotSection = synthetic.ZigGotSection;

@@ -17,8 +17,16 @@ pub fn decompress(comptime container: Container, reader: anytype, writer: anytyp
 }
 
 /// Inflate decompressor for the reader type.
-pub fn decompressor(comptime container: Container, reader: anytype) Inflate(container, @TypeOf(reader)) {
-    return Inflate(container, @TypeOf(reader)).init(reader);
+pub fn decompressor(comptime container: Container, reader: anytype) Decompressor(container, @TypeOf(reader)) {
+    return Decompressor(container, @TypeOf(reader)).init(reader);
+}
+
+pub fn Decompressor(comptime container: Container, comptime ReaderType: type) type {
+    // zlib has 4 bytes footer, lookahead of 4 bytes ensures that we will not overshoot.
+    // gzip has 8 bytes footer so we will not overshoot even with 8 bytes of lookahead.
+    // For raw deflate there is always possibility of overshot so we use 8 bytes lookahead.
+    const lookahead: type = if (container == .zlib) u32 else u64;
+    return Inflate(container, lookahead, ReaderType);
 }
 
 /// Inflate decompresses deflate bit stream. Reads compressed data from reader
@@ -40,9 +48,12 @@ pub fn decompressor(comptime container: Container, reader: anytype) Inflate(cont
 ///   * 64K for history (CircularBuffer)
 ///   * ~10K huffman decoders (Literal and DistanceDecoder)
 ///
-pub fn Inflate(comptime container: Container, comptime ReaderType: type) type {
+pub fn Inflate(comptime container: Container, comptime LookaheadType: type, comptime ReaderType: type) type {
+    assert(LookaheadType == u32 or LookaheadType == u64);
+    const BitReaderType = BitReader(LookaheadType, ReaderType);
+
     return struct {
-        const BitReaderType = BitReader(ReaderType);
+        //const BitReaderType = BitReader(ReaderType);
         const F = BitReaderType.flag;
 
         bits: BitReaderType = .{},
@@ -157,30 +168,23 @@ pub fn Inflate(comptime container: Container, comptime ReaderType: type) type {
             var cl_dec: hfd.CodegenDecoder = .{};
             try cl_dec.generate(&cl_lens);
 
-            // literal code lengths
-            var lit_lens = [_]u4{0} ** (286);
+            // decoded code lengths
+            var dec_lens = [_]u4{0} ** (286 + 30);
             var pos: usize = 0;
-            while (pos < hlit) {
+            while (pos < hlit + hdist) {
                 const sym = try cl_dec.find(try self.bits.peekF(u7, F.reverse));
                 try self.bits.shift(sym.code_bits);
-                pos += try self.dynamicCodeLength(sym.symbol, &lit_lens, pos);
+                pos += try self.dynamicCodeLength(sym.symbol, &dec_lens, pos);
             }
-            if (pos > hlit)
+            if (pos > hlit + hdist) {
                 return error.InvalidDynamicBlockHeader;
-
-            // distance code lenths
-            var dst_lens = [_]u4{0} ** (30);
-            pos = 0;
-            while (pos < hdist) {
-                const sym = try cl_dec.find(try self.bits.peekF(u7, F.reverse));
-                try self.bits.shift(sym.code_bits);
-                pos += try self.dynamicCodeLength(sym.symbol, &dst_lens, pos);
             }
-            if (pos > hdist)
-                return error.InvalidDynamicBlockHeader;
 
-            try self.lit_dec.generate(&lit_lens);
-            try self.dst_dec.generate(&dst_lens);
+            // literal code lengts to literal decoder
+            try self.lit_dec.generate(dec_lens[0..hlit]);
+
+            // distance code lengths to distance decoder
+            try self.dst_dec.generate(dec_lens[hlit .. hlit + hdist]);
         }
 
         // Decode code length symbol to code length. Writes decoded length into
@@ -226,9 +230,14 @@ pub fn Inflate(comptime container: Container, comptime ReaderType: type) type {
                 switch (sym.kind) {
                     .literal => self.hist.write(sym.symbol),
                     .match => { // Decode match backreference <length, distance>
-                        try self.bits.fill(5 + 15 + 13); // so we can use buffered reads
+                        // fill so we can use buffered reads
+                        if (LookaheadType == u32)
+                            try self.bits.fill(5 + 15)
+                        else
+                            try self.bits.fill(5 + 15 + 13);
                         const length = try self.decodeLength(sym.symbol);
                         const dsm = try self.decodeSymbol(&self.dst_dec);
+                        if (LookaheadType == u32) try self.bits.fill(13);
                         const distance = try self.decodeDistance(dsm.symbol);
                         try self.hist.writeMatch(length, distance);
                     },
@@ -295,6 +304,14 @@ pub fn Inflate(comptime container: Container, comptime ReaderType: type) type {
             }
         }
 
+        /// Returns the number of bytes that have been read from the internal
+        /// reader but not yet consumed by the decompressor.
+        pub fn unreadBytes(self: Self) usize {
+            // There can be no error here: the denominator is not zero, and
+            // overflow is not possible since the type is unsigned.
+            return std.math.divCeil(usize, self.bits.nbits, 8) catch unreachable;
+        }
+
         // Iterator interface
 
         /// Can be used in iterator like loop without memcpy to another buffer:
@@ -341,7 +358,7 @@ pub fn Inflate(comptime container: Container, comptime ReaderType: type) type {
     };
 }
 
-test "flate.Inflate decompress" {
+test "decompress" {
     const cases = [_]struct {
         in: []const u8,
         out: []const u8,
@@ -382,7 +399,7 @@ test "flate.Inflate decompress" {
     }
 }
 
-test "flate.Inflate gzip decompress" {
+test "gzip decompress" {
     const cases = [_]struct {
         in: []const u8,
         out: []const u8,
@@ -439,7 +456,7 @@ test "flate.Inflate gzip decompress" {
     }
 }
 
-test "flate.Inflate zlib decompress" {
+test "zlib decompress" {
     const cases = [_]struct {
         in: []const u8,
         out: []const u8,
@@ -465,7 +482,7 @@ test "flate.Inflate zlib decompress" {
     }
 }
 
-test "flate.Inflate fuzzing tests" {
+test "fuzzing tests" {
     const cases = [_]struct {
         input: []const u8,
         out: []const u8 = "",
@@ -496,7 +513,7 @@ test "flate.Inflate fuzzing tests" {
         .{ .input = "puff14", .err = error.EndOfStream },
         .{ .input = "puff15", .err = error.IncompleteHuffmanTree },
         .{ .input = "puff16", .err = error.InvalidDynamicBlockHeader },
-        .{ .input = "puff17", .err = error.InvalidDynamicBlockHeader }, // 25
+        .{ .input = "puff17", .err = error.MissingEndOfBlockCode }, // 25
         .{ .input = "fuzz1", .err = error.InvalidDynamicBlockHeader },
         .{ .input = "fuzz2", .err = error.InvalidDynamicBlockHeader },
         .{ .input = "fuzz3", .err = error.InvalidMatch },
@@ -506,8 +523,8 @@ test "flate.Inflate fuzzing tests" {
         .{ .input = "puff20", .err = error.OversubscribedHuffmanTree },
         .{ .input = "puff21", .err = error.OversubscribedHuffmanTree },
         .{ .input = "puff22", .err = error.OversubscribedHuffmanTree },
-        .{ .input = "puff23", .err = error.InvalidDynamicBlockHeader }, // 35
-        .{ .input = "puff24", .err = error.InvalidDynamicBlockHeader },
+        .{ .input = "puff23", .err = error.OversubscribedHuffmanTree }, // 35
+        .{ .input = "puff24", .err = error.IncompleteHuffmanTree },
         .{ .input = "puff25", .err = error.OversubscribedHuffmanTree },
         .{ .input = "puff26", .err = error.InvalidDynamicBlockHeader },
         .{ .input = "puff27", .err = error.InvalidDynamicBlockHeader },
@@ -526,4 +543,16 @@ test "flate.Inflate fuzzing tests" {
             try testing.expectEqualStrings(c.out, out.items);
         }
     }
+}
+
+test "bug 18966" {
+    const input = @embedFile("testdata/fuzz/bug_18966.input");
+    const expect = @embedFile("testdata/fuzz/bug_18966.expect");
+
+    var in = std.io.fixedBufferStream(input);
+    var out = std.ArrayList(u8).init(testing.allocator);
+    defer out.deinit();
+
+    try decompress(.gzip, in.reader(), out.writer());
+    try testing.expectEqualStrings(expect, out.items);
 }

@@ -109,6 +109,8 @@ endif()
 
 set(ZIG_TARGET_TRIPLE "native" CACHE STRING "arch-os-abi to output binaries for")
 set(ZIG_TARGET_MCPU "native" CACHE STRING "-mcpu parameter to output binaries for")
+set(ZIG_TARGET_DYNAMIC_LINKER "" CACHE STRING
+  "Override the dynamic linker used by the Zig binary. Default is to auto-detect the dynamic linker.")
 set(ZIG_SINGLE_THREADED off CACHE BOOL "limit the zig compiler to use only 1 thread")
 set(ZIG_AR_WORKAROUND off CACHE BOOL "append 'ar' subcommand to CMAKE_AR")
 
@@ -235,9 +237,7 @@ set(ZIG_STAGE2_SOURCES
     "${CMAKE_SOURCE_DIR}/lib/std/elf.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/fifo.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/fmt.zig"
-    "${CMAKE_SOURCE_DIR}/lib/std/fmt/errol.zig"
-    "${CMAKE_SOURCE_DIR}/lib/std/fmt/errol/enum3.zig"
-    "${CMAKE_SOURCE_DIR}/lib/std/fmt/errol/lookup.zig"
+    "${CMAKE_SOURCE_DIR}/lib/std/fmt/format_float.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/fmt/parse_float.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/fs.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/fs/AtomicFile.zig"
@@ -288,10 +288,10 @@ set(ZIG_STAGE2_SOURCES
     "${CMAKE_SOURCE_DIR}/lib/std/multi_array_list.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/os.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/os/linux.zig"
-    "${CMAKE_SOURCE_DIR}/lib/std/os/linux/errno/generic.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/os/linux/x86_64.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/os/linux.zig"
-    "${CMAKE_SOURCE_DIR}/lib/std/os/linux/io_uring.zig"
+    "${CMAKE_SOURCE_DIR}/lib/std/os/linux/IoUring.zig"
+    "${CMAKE_SOURCE_DIR}/lib/std/os/linux/io_uring_sqe.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/os/linux/x86_64.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/os/windows.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/os/windows/ntstatus.zig"
@@ -505,18 +505,21 @@ set(ZIG_STAGE2_SOURCES
     "${CMAKE_SOURCE_DIR}/lib/std/unicode.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/zig.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/zig/Ast.zig"
+    "${CMAKE_SOURCE_DIR}/lib/std/zig/AstGen.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/zig/AstRlAnnotate.zig"
-    "${CMAKE_SOURCE_DIR}/lib/std/zig/c_builtins.zig"
+    "${CMAKE_SOURCE_DIR}/lib/std/zig/LibCInstallation.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/zig/Parse.zig"
-    "${CMAKE_SOURCE_DIR}/lib/std/zig/render.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/zig/Server.zig"
+    "${CMAKE_SOURCE_DIR}/lib/std/zig/WindowsSdk.zig"
+    "${CMAKE_SOURCE_DIR}/lib/std/zig/Zir.zig"
+    "${CMAKE_SOURCE_DIR}/lib/std/zig/c_builtins.zig"
+    "${CMAKE_SOURCE_DIR}/lib/std/zig/render.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/zig/string_literal.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/zig/system.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/zig/system/NativePaths.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/zig/system/x86.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/zig/tokenizer.zig"
     "${CMAKE_SOURCE_DIR}/src/Air.zig"
-    "${CMAKE_SOURCE_DIR}/src/AstGen.zig"
     "${CMAKE_SOURCE_DIR}/src/Compilation.zig"
     "${CMAKE_SOURCE_DIR}/src/Compilation/Config.zig"
     "${CMAKE_SOURCE_DIR}/src/Liveness.zig"
@@ -525,9 +528,7 @@ set(ZIG_STAGE2_SOURCES
     "${CMAKE_SOURCE_DIR}/src/Package/Fetch.zig"
     "${CMAKE_SOURCE_DIR}/src/RangeSet.zig"
     "${CMAKE_SOURCE_DIR}/src/Sema.zig"
-    "${CMAKE_SOURCE_DIR}/src/TypedValue.zig"
     "${CMAKE_SOURCE_DIR}/src/Value.zig"
-    "${CMAKE_SOURCE_DIR}/src/Zir.zig"
     "${CMAKE_SOURCE_DIR}/src/arch/aarch64/CodeGen.zig"
     "${CMAKE_SOURCE_DIR}/src/arch/aarch64/Emit.zig"
     "${CMAKE_SOURCE_DIR}/src/arch/aarch64/Mir.zig"
@@ -565,12 +566,11 @@ set(ZIG_STAGE2_SOURCES
     "${CMAKE_SOURCE_DIR}/src/clang_options_data.zig"
     "${CMAKE_SOURCE_DIR}/src/codegen.zig"
     "${CMAKE_SOURCE_DIR}/src/codegen/c.zig"
-    "${CMAKE_SOURCE_DIR}/src/codegen/c/type.zig"
+    "${CMAKE_SOURCE_DIR}/src/codegen/c/Type.zig"
     "${CMAKE_SOURCE_DIR}/src/codegen/llvm.zig"
     "${CMAKE_SOURCE_DIR}/src/codegen/llvm/bindings.zig"
     "${CMAKE_SOURCE_DIR}/src/glibc.zig"
     "${CMAKE_SOURCE_DIR}/src/introspect.zig"
-    "${CMAKE_SOURCE_DIR}/src/libc_installation.zig"
     "${CMAKE_SOURCE_DIR}/src/libcxx.zig"
     "${CMAKE_SOURCE_DIR}/src/libtsan.zig"
     "${CMAKE_SOURCE_DIR}/src/libunwind.zig"
@@ -596,6 +596,7 @@ set(ZIG_STAGE2_SOURCES
     "${CMAKE_SOURCE_DIR}/src/link/Elf/relocatable.zig"
     "${CMAKE_SOURCE_DIR}/src/link/Elf/relocation.zig"
     "${CMAKE_SOURCE_DIR}/src/link/Elf/synthetic_sections.zig"
+    "${CMAKE_SOURCE_DIR}/src/link/Elf/thunks.zig"
     "${CMAKE_SOURCE_DIR}/src/link/MachO.zig"
     "${CMAKE_SOURCE_DIR}/src/link/MachO/Archive.zig"
     "${CMAKE_SOURCE_DIR}/src/link/MachO/Atom.zig"
@@ -634,20 +635,18 @@ set(ZIG_STAGE2_SOURCES
     "${CMAKE_SOURCE_DIR}/src/main.zig"
     "${CMAKE_SOURCE_DIR}/src/mingw.zig"
     "${CMAKE_SOURCE_DIR}/src/musl.zig"
+    "${CMAKE_SOURCE_DIR}/src/mutable_value.zig"
     "${CMAKE_SOURCE_DIR}/src/print_air.zig"
     "${CMAKE_SOURCE_DIR}/src/print_env.zig"
     "${CMAKE_SOURCE_DIR}/src/print_targets.zig"
+    "${CMAKE_SOURCE_DIR}/src/print_value.zig"
     "${CMAKE_SOURCE_DIR}/src/print_zir.zig"
     "${CMAKE_SOURCE_DIR}/src/register_manager.zig"
     "${CMAKE_SOURCE_DIR}/src/target.zig"
     "${CMAKE_SOURCE_DIR}/src/tracy.zig"
     "${CMAKE_SOURCE_DIR}/src/translate_c.zig"
-    "${CMAKE_SOURCE_DIR}/src/translate_c/ast.zig"
     "${CMAKE_SOURCE_DIR}/src/type.zig"
     "${CMAKE_SOURCE_DIR}/src/wasi_libc.zig"
-    "${CMAKE_SOURCE_DIR}/src/windows_sdk.zig"
-    "${CMAKE_SOURCE_DIR}/src/stubs/aro_builtins.zig"
-    "${CMAKE_SOURCE_DIR}/src/stubs/aro_names.zig"
 )
 
 if(MSVC)
@@ -822,18 +821,7 @@ set(BUILD_ZIG2_ARGS
   --dep "aro"
   --mod "root" "src/main.zig"
   --mod "build_options" "${ZIG_CONFIG_ZIG_OUT}"
-  --mod "aro_options" "src/stubs/aro_options.zig"
-  --mod "Builtins/Builtin.def" "src/stubs/aro_builtins.zig"
-  --mod "Attribute/names.def" "src/stubs/aro_names.zig"
-  --mod "Diagnostics/messages.def" "src/stubs/aro_messages.zig"
-  --dep "build_options=aro_options"
-  --mod "aro_backend" "deps/aro/backend.zig"
-  --dep "Builtins/Builtin.def"
-  --dep "Attribute/names.def"
-  --dep "Diagnostics/messages.def"
-  --dep "build_options=aro_options"
-  --dep "backend=aro_backend"
-  --mod "aro" "deps/aro/aro.zig"
+  --mod "aro" "lib/compiler/aro/aro.zig"
 )
 
 add_custom_command(
@@ -911,16 +899,18 @@ if(ZIG_STATIC AND NOT MSVC)
 else()
   set(ZIG_STATIC_ARG "")
 endif()
-
 if(CMAKE_POSITION_INDEPENDENT_CODE OR ZIG_PIE)
   set(ZIG_PIE_ARG "-Dpie")
 else()
   set(ZIG_PIE_ARG "")
 endif()
+if("${ZIG_TARGET_DYNAMIC_LINKER}" STREQUAL "")
+  set(ZIG_DYNAMIC_LINKER_ARG "")
+else()
+  set(ZIG_DYNAMIC_LINKER_ARG "-Ddynamic-linker=${ZIG_TARGET_DYNAMIC_LINKER}")
+endif()
 
 # -Dno-langref is currently hardcoded because building the langref takes too damn long
-# -Dno-autodocs is currently hardcoded because the C backend generates a miscompilation
-#   that prevents it from working.
 # To obtain these two forms of documentation, run zig build against stage3 rather than stage2.
 set(ZIG_BUILD_ARGS
   --zig-lib-dir "${CMAKE_SOURCE_DIR}/lib"
@@ -930,11 +920,11 @@ set(ZIG_BUILD_ARGS
   ${ZIG_STATIC_ARG}
   ${ZIG_NO_LIB_ARG}
   "-Dno-langref"
-  "-Dno-autodocs"
   ${ZIG_SINGLE_THREADED_ARG}
   ${ZIG_PIE_ARG}
   "-Dtarget=${ZIG_TARGET_TRIPLE}"
   "-Dcpu=${ZIG_TARGET_MCPU}"
+  ${ZIG_DYNAMIC_LINKER_ARG}
   "-Dversion-string=${RESOLVED_ZIG_VERSION}"
 )
 

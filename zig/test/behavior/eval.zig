@@ -1211,7 +1211,7 @@ test "storing an array of type in a field" {
 
     const S = struct {
         fn doTheTest() void {
-            comptime var foobar = Foobar.foo();
+            const foobar = Foobar.foo();
             foo(foobar.str[0..10]);
         }
         const Foobar = struct {
@@ -1713,4 +1713,22 @@ test "const with specified type initialized with typed array is comptime-known" 
     comptime assert(x[0] == 1);
     comptime assert(x[1] == 2);
     comptime assert(x[2] == 3);
+}
+
+test "block with comptime-known result but possible runtime exit is comptime-known" {
+    var t: bool = true;
+    _ = &t;
+
+    const a: comptime_int = a: {
+        if (!t) return error.TestFailed;
+        break :a 123;
+    };
+
+    const b: comptime_int = b: {
+        if (t) break :b 456;
+        return error.TestFailed;
+    };
+
+    comptime assert(a == 123);
+    comptime assert(b == 456);
 }
