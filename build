@@ -5,6 +5,43 @@ set -eu
 
 TARGET="$1" # Example: riscv64-linux-gnu
 MCPU="$2" # Examples: `baseline`, `native`, `generic+v7a`, or `arm1176jzf_s`
+RELEASE="$3"
+STATIC="$4"
+
+case $RELEASE in
+    "true") RELEASE_CMAKE_SWITCH="ON";;
+    "false") RELEASE_CMAKE_SWITCH="OFF";;
+esac
+
+case $RELEASE in
+    "true") DEBUG_CMAKE_SWITCH="OFF";;
+    "false") DEBUG_CMAKE_SWITCH="ON";;
+esac
+
+case $RELEASE in
+    "true") RELEASE_CMAKE_NAME="Release";;
+    "false") RELEASE_CMAKE_NAME="Debug";;
+esac
+
+case $STATIC in
+    "true") STATIC_CMAKE_SWITCH="ON";;
+    "false") STATIC_CMAKE_SWITCH="OFF";;
+esac
+
+case $STATIC in
+    "true") DYNAMIC_CMAKE_SWITCH="OFF";;
+    "false") DYNAMIC_CMAKE_SWITCH="ON";;
+esac
+
+case $RELEASE in
+    true) RELEASE_NAME="release";;
+    false) RELEASE_NAME="debug";;
+esac
+
+case $STATIC in
+    true) LINKING_NAME="static";;
+    false) LINKING_NAME="dynamic";;
+esac
 
 ROOTDIR="$(pwd)"
 ZIG_VERSION="0.13.0-dev.130+98a30acad"
@@ -22,8 +59,9 @@ case $TARGET_OS_CMAKE in
 esac
 
 # First build the libraries for Zig to link against, as well as native `llvm-tblgen`.
-mkdir -p "$ROOTDIR/out/build-llvm-host"
-cd "$ROOTDIR/out/build-llvm-host"
+MY_LLVM_HOST_DIR="$ROOTDIR/out/build-llvm-host"
+mkdir -p $MY_LLVM_HOST_DIR
+cd $MY_LLVM_HOST_DIR
 cmake "$ROOTDIR/llvm" \
   -DCMAKE_INSTALL_PREFIX="$ROOTDIR/out/host" \
   -DCMAKE_PREFIX_PATH="$ROOTDIR/out/host" \
@@ -55,8 +93,9 @@ cmake --build . --target install
 
 # Now we build Zig, still with system C/C++ compiler, linking against LLVM,
 # Clang, LLD we just built from source.
-mkdir -p "$ROOTDIR/out/build-zig-host"
-cd "$ROOTDIR/out/build-zig-host"
+MY_ZIG_HOST_DIR="$ROOTDIR/out/build-zig-host"
+mkdir -p $MY_ZIG_HOST_DIR
+cd $MY_ZIG_HOST_DIR
 cmake "$ROOTDIR/zig" \
   -DCMAKE_INSTALL_PREFIX="$ROOTDIR/out/host" \
   -DCMAKE_PREFIX_PATH="$ROOTDIR/out/host" \
@@ -67,13 +106,16 @@ cmake --build . --target install
 # Now we have Zig as a cross compiler.
 ZIG="$ROOTDIR/out/host/bin/zig"
 
+MY_SUFFIX="$TARGET-$MCPU-$RELEASE_NAME-$LINKING_NAME"
+
 # First cross compile zlib for the target, as we need the LLVM linked into
 # the final zig binary to have zlib support enabled.
-mkdir -p "$ROOTDIR/out/build-zlib-$TARGET-$MCPU"
-cd "$ROOTDIR/out/build-zlib-$TARGET-$MCPU"
+MY_ZLIB_DIR="$ROOTDIR/out/build-zlib-$MY_SUFFIX"
+mkdir -p $MY_ZLIB_DIR
+cd $MY_ZLIB_DIR
 cmake "$ROOTDIR/zlib" \
-  -DCMAKE_INSTALL_PREFIX="$ROOTDIR/out/$TARGET-$MCPU" \
-  -DCMAKE_PREFIX_PATH="$ROOTDIR/out/$TARGET-$MCPU" \
+  -DCMAKE_INSTALL_PREFIX="$ROOTDIR/out/$MY_SUFFIX" \
+  -DCMAKE_PREFIX_PATH="$ROOTDIR/out/$MY_SUFFIX" \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_CROSSCOMPILING=True \
   -DCMAKE_SYSTEM_NAME="$TARGET_OS_CMAKE" \
@@ -87,15 +129,17 @@ cmake --build . --target install
 
 # Same deal for zstd.
 # The build system for zstd is whack so I just put all the files here.
-mkdir -p "$ROOTDIR/out/$TARGET-$MCPU/lib"
-cp "$ROOTDIR/zstd/lib/zstd.h" "$ROOTDIR/out/$TARGET-$MCPU/include/zstd.h"
-cd "$ROOTDIR/out/$TARGET-$MCPU/lib"
+mkdir -p "$ROOTDIR/out/$MY_SUFFIX/lib"
+cp "$ROOTDIR/zstd/lib/zstd.h" "$ROOTDIR/out/$MY_SUFFIX/include/zstd.h"
+cd "$ROOTDIR/out/$MY_SUFFIX/lib"
+
 $ZIG build-lib \
   --name zstd \
   -target $TARGET \
   -mcpu=$MCPU \
   -fstrip -OReleaseFast \
   -lc \
+  -"$LINKING_NAME" \
   "$ROOTDIR/zstd/lib/decompress/zstd_ddict.c" \
   "$ROOTDIR/zstd/lib/decompress/zstd_decompress.c" \
   "$ROOTDIR/zstd/lib/decompress/huf_decompress.c" \
@@ -131,12 +175,13 @@ $ZIG build-lib \
   "$ROOTDIR/zstd/lib/dictBuilder/cover.c"
 
 # Rebuild LLVM with Zig.
-mkdir -p "$ROOTDIR/out/build-llvm-$TARGET-$MCPU"
-cd "$ROOTDIR/out/build-llvm-$TARGET-$MCPU"
+MY_LLVM_TARGET_DIR="$ROOTDIR/out/build-llvm-$MY_SUFFIX"
+mkdir -p $MY_LLVM_TARGET_DIR
+cd $MY_LLVM_TARGET_DIR
 cmake "$ROOTDIR/llvm" \
-  -DCMAKE_INSTALL_PREFIX="$ROOTDIR/out/$TARGET-$MCPU" \
-  -DCMAKE_PREFIX_PATH="$ROOTDIR/out/$TARGET-$MCPU" \
-  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_INSTALL_PREFIX="$ROOTDIR/out/$MY_SUFFIX" \
+  -DCMAKE_PREFIX_PATH="$ROOTDIR/out/$MY_SUFFIX" \
+  -DCMAKE_BUILD_TYPE="$RELEASE_CMAKE_NAME" \
   -DCMAKE_CROSSCOMPILING=True \
   -DCMAKE_SYSTEM_NAME="$TARGET_OS_CMAKE" \
   -DCMAKE_C_COMPILER="$ZIG;cc;-fno-sanitize=all;-s;-target;$TARGET;-mcpu=$MCPU" \
@@ -145,7 +190,8 @@ cmake "$ROOTDIR/llvm" \
   -DCMAKE_RC_COMPILER="$ROOTDIR/out/host/bin/llvm-rc" \
   -DCMAKE_AR="$ROOTDIR/out/host/bin/llvm-ar" \
   -DCMAKE_RANLIB="$ROOTDIR/out/host/bin/llvm-ranlib" \
-  -DLLVM_ENABLE_BACKTRACES=OFF \
+  -DLLVM_ENABLE_ASSERTIONS="$DEBUG_CMAKE_SWITCH" \
+  -DLLVM_ENABLE_BACKTRACES="$DEBUG_CMAKE_SWITCH" \
   -DLLVM_ENABLE_BINDINGS=OFF \
   -DLLVM_ENABLE_CRASH_OVERRIDES=OFF \
   -DLLVM_ENABLE_LIBEDIT=OFF \
@@ -158,11 +204,11 @@ cmake "$ROOTDIR/llvm" \
   -DLLVM_ENABLE_Z3_SOLVER=OFF \
   -DLLVM_ENABLE_ZLIB=FORCE_ON \
   -DLLVM_ENABLE_ZSTD=FORCE_ON \
-  -DLLVM_USE_STATIC_ZSTD=ON \
+  -DLLVM_USE_STATIC_ZSTD="$STATIC_CMAKE_SWITCH" \
   -DLLVM_TABLEGEN="$ROOTDIR/out/host/bin/llvm-tblgen" \
   -DLLVM_BUILD_UTILS=OFF \
   -DLLVM_BUILD_TOOLS=OFF \
-  -DLLVM_BUILD_STATIC=ON \
+  -DLLVM_BUILD_STATIC="$STATIC_CMAKE_SWITCH" \
   -DLLVM_INCLUDE_UTILS=OFF \
   -DLLVM_INCLUDE_TESTS=OFF \
   -DLLVM_INCLUDE_EXAMPLES=OFF \
@@ -184,19 +230,7 @@ cmake "$ROOTDIR/llvm" \
   -DCLANG_TOOL_ARCMT_TEST_BUILD=OFF \
   -DCLANG_TOOL_C_ARCMT_TEST_BUILD=OFF \
   -DCLANG_TOOL_LIBCLANG_BUILD=OFF \
-  -DLIBCLANG_BUILD_STATIC=ON \
-  -DLLD_BUILD_TOOLS=OFF
+  -DLIBCLANG_BUILD_STATIC="$STATIC_CMAKE_SWITCH" \
+  -DLLD_BUILD_TOOLS=OFF \
+  -DLLVM_BUILD_LLVM_DYLIB="$DYNAMIC_CMAKE_SWITCH"
 cmake --build . --target install
-
-# Finally, we can cross compile Zig itself, with Zig.
-cd "$ROOTDIR/zig"
-$ZIG build \
-  --prefix "$ROOTDIR/out/zig-$TARGET-$MCPU" \
-  --search-prefix "$ROOTDIR/out/$TARGET-$MCPU" \
-  -Dflat \
-  -Dstatic-llvm \
-  -Doptimize=ReleaseFast \
-  -Dstrip \
-  -Dtarget="$TARGET" \
-  -Dcpu="$MCPU" \
-  -Dversion-string="$ZIG_VERSION"
