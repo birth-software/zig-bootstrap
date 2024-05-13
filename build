@@ -7,6 +7,7 @@ TARGET="$1" # Example: riscv64-linux-gnu
 MCPU="$2" # Examples: `baseline`, `native`, `generic+v7a`, or `arm1176jzf_s`
 RELEASE="$3"
 STATIC="$4"
+STRIP="$5"
 
 case $RELEASE in
     "true") RELEASE_CMAKE_SWITCH="ON";;
@@ -22,6 +23,12 @@ case $RELEASE in
     "true") RELEASE_CMAKE_NAME="Release";;
     "false") RELEASE_CMAKE_NAME="Debug";;
 esac
+
+case $STRIP in
+    "true") RELEASE_CMAKE_NAME="$RELEASE_CMAKE_NAME";;
+    "false") RELEASE_CMAKE_NAME=RelWithDebInfo;;
+esac
+
 
 case $STATIC in
     "true") STATIC_CMAKE_SWITCH="ON";;
